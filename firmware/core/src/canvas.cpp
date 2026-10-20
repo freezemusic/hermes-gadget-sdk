@@ -16,6 +16,29 @@ void Canvas::pixel(int x, int y, uint16_t color) {
   px_[y * stride_ + x] = encode(color);
 }
 
+uint16_t Canvas::get(int x, int y) const {
+  if (x < 0 || x >= w_ || y < 0 || y >= h_) return 0;
+  const uint16_t c = px_[y * stride_ + x];
+  return swap_ ? static_cast<uint16_t>((c >> 8) | (c << 8)) : c;
+}
+
+void Canvas::blend(int x, int y, uint16_t color, int coverage) {
+  if (coverage <= 0 || x < 0 || x >= w_ || y < clip_y0_ || y >= clip_y1_ || y >= h_) return;
+  if (coverage >= 256) {
+    px_[y * stride_ + x] = encode(color);
+    return;
+  }
+  uint16_t d = px_[y * stride_ + x];
+  if (swap_) d = static_cast<uint16_t>((d >> 8) | (d << 8));
+  const int dr = (d >> 11) & 31, dg = (d >> 5) & 63, db = d & 31;
+  const int sr = (color >> 11) & 31, sg = (color >> 5) & 63, sb = color & 31;
+  const int r = dr + (sr - dr) * coverage / 256;
+  const int g = dg + (sg - dg) * coverage / 256;
+  const int b = db + (sb - db) * coverage / 256;
+  const uint16_t out = static_cast<uint16_t>((r << 11) | (g << 5) | b);
+  px_[y * stride_ + x] = encode(out);
+}
+
 void Canvas::fill_rect(int x, int y, int w, int h, uint16_t color) {
   int x0 = std::max(0, x), x1 = std::min(w_, x + w);
   int y0 = std::max(clip_y0_, y), y1 = std::min(std::min(h_, clip_y1_), y + h);

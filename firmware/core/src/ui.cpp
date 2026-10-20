@@ -83,9 +83,23 @@ int tri(uint32_t frame, int period) {
 // Everything that changes hero pixels between frames, and nothing else, so a
 // settled face does not flush. The disc colour follows the screen and is part
 // of the static key, not this one.
+face::Style face_style(const UiModel& m) {
+  face::Style s;
+  s.morph = m.face_morph;
+  s.shape = m.face_shape;
+  s.shape_k = m.face_shape_k;
+  s.wake = m.face_wake;
+  s.reaction = m.face_reaction;
+  s.asleep = m.face_asleep;
+  s.swirl = m.face_swirl;
+  s.busy = m.face_busy;
+  return s;
+}
+
 uint32_t hero_anim_key(const UiModel& m, int diameter) {
-  return face::picture_key(m.face_frame, face::mood_for(m.screen, m.face_happy), m.level, m.voice,
-                           face::dots_for(m.screen), diameter);
+  const face::Style style = face_style(m);
+  return face::picture_key(m.face_frame, face::mood_for(m.screen, m.face_happy, m.face_reaction, m.face_busy), m.level,
+                           m.voice, face::dots_for(m.screen, m.face_busy), diameter, style);
 }
 
 uint16_t tone_color(DashRow::Tone t) {
@@ -273,7 +287,7 @@ void Ui::draw_frame(const UiModel& m) {
     int y0 = y_header, y1 = y_bottom;
     bool redraw = !valid_ || !hero_valid_ || stat != hero_static_;
     if (!redraw && anim != hero_anim_) {
-      hero_anim_rows(m, y0, y1);  // only what can move
+      hero_anim_rows(m, y0, y1);  // eye band, or the whole body while it is changing shape
       redraw = true;
     }
     if (redraw) {
@@ -283,6 +297,7 @@ void Ui::draw_frame(const UiModel& m) {
     }
     hero_static_ = stat;
     hero_anim_ = anim;
+    hero_wide_ = face::anim_wide(face_style(m));
     hero_valid_ = true;
     hash_[1] = hash_[2] = 0;  // header and content must repaint when hero mode ends
     valid_ = true;
@@ -703,21 +718,24 @@ Ui::HeroGeom Ui::hero_geom(const UiModel& m) const {
   // Reserve one detail line even when there is none, so the face keeps its size.
   const int ch = caption_h(std::max<int>(1, static_cast<int>(g.detail.size())));
   const int avail = std::min(w - 8 * s, layout_.main_h - ch - buttons_h - 4 * s);
-  // A margin around the disc keeps the dark field, and keeps side pixels of a
-  // round panel clear of the face.
-  g.size = std::max(16, avail * 9 / 10);
-  const int block = g.size + 2 * s + ch + buttons_h;
+  // The body is about two thirds of the free square, so the field and the
+  // caption stay clear of it. Rings extend past the disc; `rim` reserves that.
+  const int slot = std::max(16, avail);
+  g.size = std::max(16, slot * 68 / 100);
+  const int rim = std::max(s, g.size * 16 / 100);
+  const int block = g.size + rim + 2 * s + ch + buttons_h;
   g.x = (w - g.size) / 2;
   g.y = layout_.main_y + std::max(s, (layout_.main_h - block) / 2);
-  g.caption_y = g.y + g.size + 2 * s;
+  g.caption_y = g.y + g.size + rim;
   g.buttons_y = g.caption_y + ch + 2 * s;
   return g;
 }
 
 void Ui::hero_anim_rows(const UiModel& m, int& y0, int& y1) const {
   const HeroGeom g = hero_geom(m);
+  const face::Style style = face_style(m);
   int top = 0, bottom = 0;
-  face::anim_rows(g.y + g.size / 2, g.size, top, bottom);
+  face::anim_rows(g.y + g.size / 2, g.size, top, bottom, face::anim_wide(style) || hero_wide_, style.morph);
   y0 = std::max(top, layout_.top_h);
   y1 = std::min(bottom, static_cast<int>(info_.height) - layout_.bottom_h);
   if (y1 < y0) y1 = y0;
@@ -732,8 +750,8 @@ void Ui::draw_hero(Canvas& c, const UiModel& m) {
   c.fill_rect(0, y0, w, y1 - y0, bg_);
 
   const HeroGeom g = hero_geom(m);
-  face::draw(c, g.x + g.size / 2, g.y + g.size / 2, g.size, m.screen, m.face_happy, m.face_frame, m.level,
-             m.voice);
+  face::draw(c, g.x + g.size / 2, g.y + g.size / 2, g.size, m.screen, m.face_happy, m.face_frame, m.level, m.voice,
+             face_style(m));
 
   // Caption: headline, then the detail lines, centred.
   const int cols = layout_.hero_cols;

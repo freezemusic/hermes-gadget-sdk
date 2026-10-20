@@ -264,6 +264,10 @@ class App {
   void flush_display_state();
   void set_hint_flash(std::string text);
   void update_model();
+  // One step of the face clock: morph, sleep, shape. Reactions are published
+  // with the model so a status phrase shows up on the same frame.
+  void step_face(const UiModel& m);
+  void publish_face(UiModel& m);
   void log(LogLevel level, std::string_view msg);
   uint32_t now() const { return hal_.system->now_ms(); }
   bool speaking() const;
@@ -425,6 +429,22 @@ class App {
   uint32_t voice_at_ = 0;
   bool happy_arm_ = false;  // a successful turn wants a smile the next time the face shows
   uint32_t happy_until_ = 0;  // face frame the smile runs until; 0 = off
+  bool face_stepped_ = false;
+  uint8_t face_morph_ = 0;       // 0 body .. 100 three dots
+  uint8_t face_shape_ = 0;       // 0 circle, 1 pebble, 2 squircle, 3 triangle
+  uint8_t face_shape_k_ = 0;     // blend toward face_shape_
+  uint8_t face_wake_ = 100;      // 0 one dot .. 100 full body
+  bool face_asleep_ = false;
+  uint8_t face_reaction_ = 0;
+  bool face_busy_ = false;
+  bool idle_mark_valid_ = false;
+  uint32_t idle_mark_ = 0;
+  uint32_t surprised_until_ = 0;
+  uint32_t confused_until_ = 0;
+  bool confuse_arm_ = false;
+  uint8_t shape_phase_ = 0;  // 0 idle, 1 blend in, 2 hold, 3 blend out
+  uint8_t shape_next_ = 1;
+  uint32_t shape_hold_ = 0;
 
   // frame timing: the running statistics while `perf` is on, and the bench
   std::unique_ptr<FrameStats> frame_stats_;

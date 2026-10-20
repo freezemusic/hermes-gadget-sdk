@@ -14,6 +14,21 @@ int count_color(const std::vector<uint16_t>& fb, uint16_t color) {
   return n;
 }
 
+// The disc is a dithered gradient, so it is not one RGB565 value. A body pixel
+// is still blue-dominant: the 565 blue channel leads red, and green stays up.
+bool blue_dominant(uint16_t p) {
+  const int r = (p >> 11) & 31;
+  const int g = (p >> 5) & 63;
+  const int b = p & 31;
+  return b >= 12 && b > r && g > r;
+}
+
+int count_blue(const std::vector<uint16_t>& fb) {
+  int n = 0;
+  for (uint16_t p : fb) n += blue_dominant(p);
+  return n;
+}
+
 }  // namespace
 
 TEST("face: blinks are 2.6-6s apart and every fifth blink is a double") {
@@ -70,7 +85,6 @@ TEST("face: a shut blink is a thinner eye than an open one, on a blue disc") {
     void flush(uint16_t, uint16_t) override {}
   } panel;
   hg::Canvas canvas(panel.framebuffer(), 120, 120, false);
-  const uint16_t blue = hg::rgb565(hg::face::kBlueR, hg::face::kBlueG, hg::face::kBlueB);
   const uint16_t eye = hg::rgb565(hg::face::kEyeR, hg::face::kEyeG, hg::face::kEyeB);
 
   uint32_t open_f = 0, shut_f = 0;
@@ -92,7 +106,7 @@ TEST("face: a shut blink is a thinner eye than an open one, on a blue disc") {
   };
   paint(open_f);
   const int open_eyes = count_color(panel.fb, eye);
-  const int blue_px = count_color(panel.fb, blue);
+  const int blue_px = count_blue(panel.fb);
   CHECK(blue_px > 500);
   CHECK(open_eyes > 40);
   paint(shut_f);
@@ -112,7 +126,7 @@ TEST("face: moods pick a pose and a body colour") {
   CHECK(hg::face::mood_for(hg::Screen::Listening, false) == hg::face::Mood::Attentive);
   CHECK(hg::face::mood_for(hg::Screen::Thinking, false) == hg::face::Mood::Thinking);
   CHECK(hg::face::mood_for(hg::Screen::Responding, false) == hg::face::Mood::Speaking);
-  CHECK(hg::face::mood_for(hg::Screen::Error, false) == hg::face::Mood::Confused);
+  CHECK(hg::face::mood_for(hg::Screen::Error, false) == hg::face::Mood::Alert);
   CHECK(hg::face::mood_for(hg::Screen::Pairing, false) == hg::face::Mood::Curious);
   CHECK(hg::face::mood_for(hg::Screen::Connecting, false) == hg::face::Mood::Curious);
   CHECK(hg::face::mood_for(hg::Screen::Offline, false) == hg::face::Mood::Sleepy);
@@ -147,4 +161,66 @@ TEST("face: speaking changes every frame; a settled idle face does not") {
     }
   }
   CHECK(stable);
+}
+
+TEST("face: happy eyes are short and nearly level") {
+  const auto s = hg::face::sample(0, hg::face::Mood::Happy, 0, 0, false);
+  CHECK(s.left.h < s.left.w / 2);
+  CHECK(s.right.h < s.right.w / 2);
+  CHECK(s.left.tilt > -6 && s.left.tilt < 6);
+  CHECK(s.right.tilt > -6 && s.right.tilt < 6);
+  CHECK(s.left.tilt != s.right.tilt);
+}
+
+TEST("face: thinking morphs the body into three dots, and an error is only a mark") {
+  struct Panel : hg::Display {
+    std::vector<uint16_t> fb = std::vector<uint16_t>(160 * 160, 0);
+    hg::DisplayInfo info() const override {
+      hg::DisplayInfo d;
+      d.width = d.height = 160;
+      return d;
+    }
+    uint16_t* framebuffer() override { return fb.data(); }
+    void flush(uint16_t, uint16_t) override {}
+  } panel;
+  hg::Canvas canvas(panel.framebuffer(), 160, 160, false);
+
+  auto paint = [&](hg::Screen screen, hg::face::Style style) {
+    std::fill(panel.fb.begin(), panel.fb.end(), 0);
+    hg::face::draw(canvas, 80, 80, 120, screen, false, 0, 0, 0, style);
+  };
+  paint(hg::Screen::Ready, {});
+  const int body = count_blue(panel.fb);
+  CHECK(body > 1000);
+  // A second draw of the same model matches, dither included.
+  std::vector<uint16_t> first = panel.fb;
+  paint(hg::Screen::Ready, {});
+  CHECK(panel.fb == first);
+
+  hg::face::Style dots;
+  dots.morph = 100;
+  paint(hg::Screen::Thinking, dots);
+  CHECK(count_blue(panel.fb) < body / 5);
+  // Three separated blobs on the centre row, and no disc out at the side.
+  int runs = 0, in = 0;
+  for (int x = 20; x < 140; ++x) {
+    const bool on = panel.fb[static_cast<size_t>(80 * 160 + x)] != 0;
+    if (on && !in) ++runs;
+    in = on;
+  }
+  CHECK(runs == 3);
+  CHECK(panel.fb[static_cast<size_t>(80 * 160 + 20)] == 0);
+
+  paint(hg::Screen::Error, {});
+  CHECK(count_blue(panel.fb) == 0);
+  CHECK(count_color(panel.fb, hg::rgb565(hg::face::kRedR, hg::face::kRedG, hg::face::kRedB)) > 20);
+  CHECK(panel.fb[static_cast<size_t>(80 * 160 + 20)] == 0);
+
+  CHECK(hg::face::mood_for(hg::Screen::Thinking, false, 7, true) == hg::face::Mood::Wide);
+  CHECK(!hg::face::dots_for(hg::Screen::Thinking, true));
+  CHECK(hg::face::dots_for(hg::Screen::Thinking, false));
+  hg::face::Style swirl;
+  swirl.swirl = true;
+  CHECK(hg::face::anim_wide(swirl));
+  CHECK(!hg::face::anim_wide({}));
 }

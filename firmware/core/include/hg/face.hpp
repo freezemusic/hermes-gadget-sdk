@@ -1,4 +1,4 @@
-// Procedural face for hero screens: a flat coloured disc and two dark pill eyes.
+// Procedural face for hero screens: a shaded body and two dark eyes, no mouth.
 //
 // Blink spacing, the 1-in-5 double blink, glance spacing and the exponential
 // glance ease are adapted from zongzhu-bot (MIT):
@@ -10,14 +10,13 @@
 // Copyright (c) 2025 Project Contributors
 // The full license is LICENSES/zongzhu-MIT.txt.
 //
-// Adapted for Hermes Gadget: integer thousandths of the face diameter (the
-// upstream table is pixel-sized white eyes), moods mapped onto Screen, and an
-// original coloured-disc drawing. Timing assumes a face frame is 33 ms (about
-// 30 fps; see kFaceFrameMs in app.cpp). Nothing here reads a clock or an RNG;
-// every pose is a function of the frame counter the app passes in.
+// Eye shapes and which expression a state holds are informed by the Grok Bot
+// iOS app v0.18.0 activity table (unofficial extract; see docs/faces.md). The
+// drawing and the timing code here are original. Nothing reads a clock or an
+// RNG; every pose is a function of the frame counter and Style the app passes.
 //
 // Colours and timings to edit:
-//   kBlue / kRed / kDim / kEye     body and pupil colours (RGB888)
+//   kBlue / kRed / kDim / kEye     gradient stops and the pupil (RGB888)
 //   kBlinkWindow / kGlanceWindow   how often the face blinks and looks aside
 //   kBreathAmp / kSpeakAmp         idle breathing and speaking bounce
 #pragma once
@@ -29,38 +28,70 @@
 
 namespace hg::face {
 
-// Body colours, RGB888. RGB565 cannot hold #499BF1 exactly; the constants are
-// the source of truth and rgb565() quantises them at compile time.
+// Body gradient stops, RGB888. Light is the top-left, the named colour is the
+// middle, and shade is a deeper version of the same hue at the bottom-right.
+// RGB565 cannot hold these exactly; rgb565() quantises them, and the disc
+// dithers so the steps do not band.
 constexpr uint8_t kBlueR = 0x49, kBlueG = 0x9B, kBlueB = 0xF1;
-constexpr uint8_t kBlueHiR = 0x8E, kBlueHiG = 0xC6, kBlueHiB = 0xFB;
-constexpr uint8_t kBlueCoreR = 0xD6, kBlueCoreG = 0xEA, kBlueCoreB = 0xFE;
-constexpr uint8_t kBlueShadeR = 0x2E, kBlueShadeG = 0x78, kBlueShadeB = 0xD4;
+constexpr uint8_t kBlueHiR = 0xA9, kBlueHiG = 0xD4, kBlueHiB = 0xFC;
+constexpr uint8_t kBlueCoreR = 0xC5, kBlueCoreG = 0xE4, kBlueCoreB = 0xFE;
+constexpr uint8_t kBlueShadeR = 0x3F, kBlueShadeG = 0x86, kBlueShadeB = 0xE6;
 
 constexpr uint8_t kRedR = 0xEC, kRedG = 0x66, kRedB = 0x5E;
-constexpr uint8_t kRedHiR = 0xF8, kRedHiG = 0xA4, kRedHiB = 0x9C;
+constexpr uint8_t kRedHiR = 0xF8, kRedHiG = 0xC4, kRedHiB = 0xBC;
 constexpr uint8_t kRedCoreR = 0xFE, kRedCoreG = 0xD4, kRedCoreB = 0xCE;
-constexpr uint8_t kRedShadeR = 0xC4, kRedShadeG = 0x40, kRedShadeB = 0x3C;
+constexpr uint8_t kRedShadeR = 0xE2, kRedShadeG = 0x5A, kRedShadeB = 0x52;
 
 constexpr uint8_t kDimR = 0x3A, kDimG = 0x6C, kDimB = 0xA8;
-constexpr uint8_t kDimHiR = 0x74, kDimHiG = 0xA4, kDimHiB = 0xD0;
+constexpr uint8_t kDimHiR = 0x8F, kDimHiG = 0xB6, kDimHiB = 0xDE;
 constexpr uint8_t kDimCoreR = 0xB4, kDimCoreG = 0xD0, kDimCoreB = 0xE8;
-constexpr uint8_t kDimShadeR = 0x24, kDimShadeG = 0x50, kDimShadeB = 0x80;
+constexpr uint8_t kDimShadeR = 0x2F, kDimShadeG = 0x5E, kDimShadeB = 0x96;
 
 constexpr uint8_t kEyeR = 0x0D, kEyeG = 0x0D, kEyeB = 0x0D;
 
 enum class Mood : uint8_t {
   Neutral,    // ready, boot, cards
   Attentive,  // listening, questions
-  Curious,    // pairing, connecting, updating
-  Thinking,
+  Curious,    // pairing, and working when a status phrase is showing
+  Thinking,   // waiting on the server: the body becomes three dots
   Speaking,
   Happy,
-  Confused,  // error
-  Sleepy,    // offline
+  Confused,  // a failed turn, and an idle reaction
+  Sleepy,    // offline, before the body collapses
+  Wink,
+  Wide,  // searching, and an idle reaction
+  Surprised,
+  Alert,  // error: a red mark, no body
+  Sleep,  // one dot
+  Playful,
+  Proud,
+  Shy,
 };
 
-Mood mood_for(Screen screen, bool happy);
-bool dots_for(Screen screen);
+// What the app is doing to the body, on top of the mood.
+// morph 0 = the body, 100 = three dots. shape 0 circle, 1 pebble, 2 squircle,
+// 3 triangle; shape_k is the blend, 0..100. wake 0 = one dot, 100 = full body.
+// reaction is documented in docs/faces.md (0 = the screen's own pose).
+struct Style {
+  uint8_t morph = 0;
+  uint8_t shape = 0;
+  uint8_t shape_k = 0;
+  uint8_t wake = 100;
+  uint8_t reaction = 0;
+  bool asleep = false;
+  bool swirl = false;
+  bool busy = false;
+};
+
+// True while the silhouette outside the eye band is moving (rings, a shape
+// blend, the thinking morph, or the sleep collapse). A settled pebble, a
+// finished three-dot pose and a finished sleep dot are not wide: one wide
+// flush has already cleared the old pixels.
+bool anim_wide(const Style& style);
+
+Mood mood_for(Screen screen, bool happy, uint8_t reaction = 0, bool busy = false);
+// Thinking dots. A working/searching phrase (busy) keeps the body instead.
+bool dots_for(Screen screen, bool busy = false);
 
 struct Palette {
   uint16_t body, mid, highlight, core, shade, eye;
@@ -83,16 +114,18 @@ struct Sample {
 // level and voice are 0..100 (microphone RMS, speaker RMS).
 Sample sample(uint32_t frame, Mood mood, uint8_t level, uint8_t voice, bool dots);
 
-// Hash of the pixels sample() will draw at this diameter. Equal keys mean the
-// eye band does not need another flush. Speaking mixes in the raw frame so the
-// bounce is sent every face frame.
-uint32_t picture_key(uint32_t frame, Mood mood, uint8_t level, uint8_t voice, bool dots, int diameter);
+// Hash of the pixels that will be drawn at this diameter. Equal keys mean the
+// moving band does not need another flush. Speaking, the loading swirl and the
+// three-dot pulse mix in the raw frame.
+uint32_t picture_key(uint32_t frame, Mood mood, uint8_t level, uint8_t voice, bool dots, int diameter,
+                     const Style& style = {});
 
-// Rows the eyes, glances and thinking dots can touch, in canvas coordinates.
-void anim_rows(int cy, int diameter, int& y0, int& y1);
+// Rows the face can touch, in canvas coordinates. wide covers the body and the
+// rings; morph >= 80 and not wide is the three-dot band.
+void anim_rows(int cy, int diameter, int& y0, int& y1, bool wide = false, uint8_t morph = 0);
 
-// Disc plus eyes. The caller has already filled the background.
+// Body, eyes, and any overlay. The caller has already filled the background.
 void draw(Canvas& c, int cx, int cy, int diameter, Screen screen, bool happy, uint32_t frame, uint8_t level,
-          uint8_t voice);
+          uint8_t voice, const Style& style = {});
 
 }  // namespace hg::face

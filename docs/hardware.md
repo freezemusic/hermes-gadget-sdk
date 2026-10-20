@@ -409,9 +409,9 @@ The USB-C port is the S3's own USB Serial/JTAG, used for both flashing and the s
 ### First flash: what to check
 
 1. **Boot log:** `CO5300 410x486 ready`, `codecs: speaker ready, microphones ready`, `touch read on INT (GPIO 38)` and `touch ready, key off, encoder off`. In the `diag` report, `i2c` should include `0x18` (ES8311), `0x34` (AXP2101), `0x40` (ES7210), `0x51` (PCF85063) and `0x6b` (QMI8658). `0x38` (FT3168) is listed only while the touch chip is awake: it dozes after a few idle seconds and doesn't answer then.
-2. **Screen:** the face (a blue disc and two dark eyes) is centred and not mirrored; text is white on dark slate bars, and the link dot is green once online. An error turns the disc red. A stripe at one edge means the column offset is off. Text clipped by a rounded corner means `corner_inset` needs raising.
+2. **Screen:** the face (a blue gradient body and two dark eyes) is centred and not mirrored; text is white on dark slate bars, and the link dot is green once online. An error replaces the body with a red exclamation mark. A stripe at one edge means the column offset is off. Text clipped by a rounded corner means `corner_inset` needs raising.
 3. **Touch:** holding the screen shows the listening face, and a swipe *down* cancels. Report mirrored coordinates with the board revision; this FT5x06 adapter does not apply `touch.mirror_x` or `touch.mirror_y`. If they are 8 rows off, adjust `touch.offset_y`.
-4. **Microphones:** say something. The waves move with your voice and the transcript is right; in tap mode, a sentence spoken at arm's length starts and ends the recording.
+4. **Microphones:** say something. The eyes grow with your voice and the transcript is right; in tap mode, a sentence spoken at arm's length starts and ends the recording.
 5. **Speaker:** replies are clear and loud enough (`set volume 80`), with no hiss between replies.
 6. **Power:** a short PWR press toggles the screen, and the battery reading appears with a cell attached.
 
@@ -451,7 +451,7 @@ The USB-C port is the S3's own USB Serial/JTAG, used for both flashing and the s
 1. **Boot log:** `CO5300 480x480 ready`, `codecs: speaker ready, microphones ready`, plus `touch ready, key off, encoder off`. In the `diag` report, `i2c` should include `0x18` (ES8311), `0x34` (AXP2101), `0x40` (ES7210), `0x51` (PCF85063), `0x5a` (CST9220) and `0x6b` (QMI8658).
 2. **Screen:** the face is upright and not mirrored; text is white on dark slate bars, and the link dot is green once online. A stripe at one edge means the column offset is off.
 3. **Touch:** holding the screen shows the listening face, and a swipe *down* cancels. Report mirrored or offset coordinates with the board revision.
-4. **Microphones:** say something. The waves move with your voice and the transcript is right; in tap mode, a sentence spoken at arm's length starts and ends the recording.
+4. **Microphones:** say something. The eyes grow with your voice and the transcript is right; in tap mode, a sentence spoken at arm's length starts and ends the recording.
 5. **Speaker:** replies are clear and loud enough (`set volume 80`), with no hiss between replies.
 
 The CO5300 start-up table and the pin map come from Waveshare's [board support package](https://github.com/waveshareteam/Waveshare-ESP32-components/tree/63ac675334db62509082e182ff900bf60f21f009/bsp/esp32_s3_touch_amoled_2_16) 2.0.1 at commit `63ac675`, checked against the [product documentation](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16); see [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES.md).

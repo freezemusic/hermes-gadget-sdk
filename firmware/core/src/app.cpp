@@ -27,9 +27,35 @@ constexpr uint32_t kPageLineMs = 1000;        // long text: reading time per lin
 constexpr uint32_t kManualScrollPauseMs = 15000;  // UP/DOWN pauses automatic paging this long
 constexpr uint8_t kCaptionLines = 3;          // detail lines on pairing, setup and card screens
 constexpr uint8_t kPromptLines = 4;           // ...and on a question (the renderer drops lines on small screens)
+bool contains_ci(const std::string& s, const char* needle) {
+  const size_t n = std::strlen(needle);
+  if (n == 0 || s.size() < n) return false;
+  for (size_t i = 0; i + n <= s.size(); ++i) {
+    bool ok = true;
+    for (size_t j = 0; j < n; ++j) {
+      char a = s[i + j];
+      if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+      if (a != needle[j]) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return true;
+  }
+  return false;
+}
+
 constexpr uint32_t kFrameMs = 100;
 constexpr uint32_t kFaceFrameMs = 33;  // ~30 fps while a hero face is on screen
-constexpr uint32_t kHappyFrames = 60;  // ~2 s of the smile after a successful turn
+constexpr uint32_t kHappyFrames = 90;  // ~3 s, inside the app's 2.5–4.5 s happy hold
+constexpr uint32_t kFaceSleepReady = 750;    // ~25 s of idle before the body collapses
+constexpr uint32_t kFaceSleepOffline = 200;  // ~6.6 s offline before the same collapse
+constexpr uint32_t kConfusedFrames = 90;     // ~3 s, inside the app's 2.2–3.8 s confused hold
+constexpr uint32_t kSurpriseFrames = 18;     // a short beat, then the speaker moves the eyes
+constexpr uint32_t kShapeStart = 900;        // leave the first moments a plain circle
+constexpr uint32_t kReactionStart = 36;
+constexpr uint32_t kReactionRest = 90;  // ~3 s of the idle pose
+constexpr uint32_t kReactionHold = 36;  // ~1.2 s, the app's onboarding cadence
 constexpr uint32_t kSensorIntervalMs = 2000;
 constexpr uint32_t kDefaultCardMs = 15000;
 constexpr int kDashboardVersion = 1;    // the dashboard message this firmware draws
@@ -476,6 +502,9 @@ void App::h_turn_start(const json::Value& m) {
   status_.clear();
   happy_arm_ = false;
   happy_until_ = 0;
+  surprised_until_ = 0;
+  confused_until_ = 0;
+  confuse_arm_ = false;
 }
 
 void App::h_turn_end(const json::Value& m) {
@@ -486,6 +515,7 @@ void App::h_turn_end(const json::Value& m) {
   if (m["outcome"].as_string() == "failure" && reply_.empty()) {
     notice_ = "Hermes could not complete that request";
     notice_until_ = now() + 8000;
+    confuse_arm_ = true;
   } else if (m["outcome"].as_string() == "success") {
     happy_arm_ = true;
   }
@@ -1468,6 +1498,7 @@ void App::tick() {
       voice_at_ = t;
     }
     if (happy_until_ && face_frame_ >= happy_until_) happy_until_ = 0;
+    face_stepped_ = true;
     stepped = true;
   }
   if (stepped) update_model();
@@ -1654,7 +1685,9 @@ void App::update_model() {
   } else if (mode_ == Mode::Thinking) {
     m.screen = Screen::Thinking;
     m.hero = true;
-    m.headline = "Thinking";
+    if (!status_.empty() && contains_ci(status_, "search")) m.headline = "Searching";
+    else if (!status_.empty()) m.headline = "Working";
+    else m.headline = "Thinking";
     // The live status phrase when Hermes sends one, else what speech-to-text heard.
     m.detail = status_;
     if (!user_echo_.empty()) {
@@ -1698,7 +1731,116 @@ void App::update_model() {
     happy_arm_ = false;
   }
   m.face_happy = m.hero && happy_until_ != 0 && face_frame_ < happy_until_;
+  if (face_stepped_) {
+    face_stepped_ = false;
+    step_face(m);
+  }
+  if (confuse_arm_ && m.hero && m.screen == Screen::Ready) {
+    confused_until_ = face_frame_ + kConfusedFrames;
+    confuse_arm_ = false;
+  }
+  if (m.screen != Screen::Responding) surprised_until_ = 0;
+  publish_face(m);
   if (!display_sleeping_) render(m);
+}
+
+void App::step_face(const UiModel& m) {
+  const bool thinking = m.screen == Screen::Thinking && status_.empty();
+  if (thinking && m.hero) {
+    face_morph_ = std::min<uint8_t>(100, static_cast<uint8_t>(face_morph_ + 6));
+  } else if (face_morph_ > 0) {
+    if (m.screen == Screen::Responding && surprised_until_ == 0)
+      surprised_until_ = face_frame_ + 17 + kSurpriseFrames;
+    face_morph_ = face_morph_ > 6 ? static_cast<uint8_t>(face_morph_ - 6) : 0;
+  }
+  if (!m.hero && mode_ != Mode::Thinking) face_morph_ = 0;
+
+  bool want_sleep = false;
+  const bool idle_face = m.hero && face_morph_ == 0 && !m.face_happy;
+  if (idle_face && m.screen == Screen::Ready && mode_ == Mode::Idle) {
+    if (!idle_mark_valid_) {
+      idle_mark_ = face_frame_;
+      idle_mark_valid_ = true;
+    }
+    if (face_frame_ - idle_mark_ >= kFaceSleepReady) want_sleep = true;
+  } else if (idle_face && m.screen == Screen::Offline) {
+    if (!idle_mark_valid_) {
+      idle_mark_ = face_frame_;
+      idle_mark_valid_ = true;
+    }
+    if (face_frame_ - idle_mark_ >= kFaceSleepOffline) want_sleep = true;
+  } else {
+    idle_mark_valid_ = false;
+  }
+  if (display_dimmed_ && m.hero && (m.screen == Screen::Ready || m.screen == Screen::Offline)) want_sleep = true;
+
+  if (want_sleep) {
+    face_asleep_ = true;
+    face_wake_ = face_wake_ > 4 ? static_cast<uint8_t>(face_wake_ - 4) : 0;
+  } else if (face_wake_ < 100) {
+    face_wake_ = std::min<uint8_t>(100, static_cast<uint8_t>(face_wake_ + 4));
+    if (face_wake_ == 100) face_asleep_ = false;
+  } else {
+    face_asleep_ = false;
+  }
+
+  const bool wander = m.hero && m.screen == Screen::Ready && !m.face_happy && !face_asleep_ && face_wake_ == 100 &&
+                      face_morph_ == 0 && face_frame_ >= kShapeStart;
+  if (!wander) {
+    if (face_shape_k_ > 8) face_shape_k_ = static_cast<uint8_t>(face_shape_k_ - 8);
+    else face_shape_k_ = 0;
+    if (face_shape_k_ == 0) shape_phase_ = 0;
+  } else if (shape_phase_ == 0) {
+    shape_phase_ = 1;
+    face_shape_ = shape_next_;
+  } else if (shape_phase_ == 1) {
+    face_shape_k_ = std::min<uint8_t>(100, static_cast<uint8_t>(face_shape_k_ + 8));
+    if (face_shape_k_ == 100) {
+      shape_phase_ = 2;
+      shape_hold_ = face_frame_ + 140;
+    }
+  } else if (shape_phase_ == 2) {
+    if (face_frame_ >= shape_hold_) shape_phase_ = 3;
+  } else if (face_shape_k_ > 8) {
+    face_shape_k_ = static_cast<uint8_t>(face_shape_k_ - 8);
+  } else {
+    face_shape_k_ = 0;
+    shape_phase_ = 0;
+    shape_next_ = static_cast<uint8_t>(shape_next_ % 3 + 1);
+  }
+}
+
+void App::publish_face(UiModel& m) {
+  if (!m.hero && mode_ != Mode::Thinking) face_morph_ = 0;
+  const bool busy = m.screen == Screen::Thinking && !status_.empty();
+  face_busy_ = busy;
+  face_reaction_ = 0;
+  if (m.hero && m.screen == Screen::Ready && !m.face_happy && !face_asleep_ && face_wake_ == 100 && face_morph_ == 0 &&
+      confused_until_ != 0 && face_frame_ < confused_until_) {
+    face_reaction_ = 8;
+  } else if (m.hero && m.screen == Screen::Responding && surprised_until_ != 0 && face_frame_ < surprised_until_) {
+    face_reaction_ = 6;
+  } else if (busy) {
+    face_reaction_ = contains_ci(status_, "search") ? 7 : 1;
+  } else if (m.hero && m.screen == Screen::Ready && !m.face_happy && !face_asleep_ && face_wake_ == 100 &&
+             face_morph_ == 0 && face_frame_ >= kReactionStart) {
+    const uint32_t t = face_frame_ - kReactionStart;
+    const uint32_t span = kReactionRest + kReactionHold;
+    if (t % span >= kReactionRest) face_reaction_ = static_cast<uint8_t>(1 + (t / span) % 7u);
+  }
+  m.face_morph = face_morph_;
+  m.face_wake = face_wake_;
+  m.face_asleep = face_asleep_;
+  m.face_reaction = face_reaction_;
+  m.face_busy = face_busy_;
+  m.face_swirl = m.screen == Screen::Connecting || m.screen == Screen::Updating;
+  if (m.screen == Screen::Updating) {
+    m.face_shape = 3;
+    m.face_shape_k = 100;
+  } else {
+    m.face_shape = face_shape_;
+    m.face_shape_k = face_shape_k_;
+  }
 }
 
 // --------------------------------------------------------------------------

@@ -1,41 +1,50 @@
 # Faces
 
-Hero screens draw a face in code: a flat coloured disc and two dark pill eyes, with no mouth.
+Hero screens draw a face in code: a shaded body and two dark eyes, with no mouth.
 The same routine covers idle, listening, thinking, speaking before the text arrives, boot,
 connecting, pairing, offline, errors, questions and short cards. Reply text still replaces the
 face until it times out.
 
-The pose is a function of the frame counter the app passes in. The renderer never reads a
-clock and never draws a random number, so the same model is the same pixels.
+The pose is a function of the frame counter and the style the app passes in. The renderer
+never reads a clock and never draws a random number, so the same model is the same pixels.
 
-| Screen | Face |
-|---|---|
-| Ready, boot, short cards | Neutral. Blinks and glances on their own, with a slow breath |
-| Listening, questions | Attentive. The eyes grow with the microphone level |
-| Thinking | Both eyes look up and aside, and three dots step underneath |
-| Responding, while there is no text yet | The eyes bounce with the speaker level |
-| Error | Confused: one eye stays open, the other flattens, and the disc turns red |
-| Pairing | Curious: the two eyes tilt differently |
-| Connecting, updating | The curious pose, plus the stepping dots |
-| Offline | Sleepy: two small dots, on a dimmer disc |
-| Ready, for about two seconds after a successful reply | Happy: the eyes flatten into short upward dashes |
+The body is about 68% of the free square, with a margin so the caption does not sit on it.
+Colour runs in a smooth diagonal from a light top-left to a deeper bottom-right of the same
+hue, with ordered 4×4 Bayer dither so the 16-bit steps do not band. The silhouette and the
+eyes are coverage-antialiased against whatever is already in the framebuffer. The eyes are
+`#0D0D0D`, tilted a few degrees and slightly uneven from each other, with tapered ends.
 
-A successful reply arms that smile. If the reply is text, the text stays up for its usual
-20 seconds and the smile plays the next time the face is back. A voice-only reply, with the
-face still on screen, smiles at once. A failure does not.
+## What the watch shows
 
-The disc is blue (`#499BF1`) on every state except an error (red, `#EC665E`) and offline
-(a dimmer blue). A lighter patch sits in the upper left and a darker crescent in the lower
-right. Emissive panels keep the field around the disc true black, so those pixels stay off.
-The eyes are `#0D0D0D`.
+The activity names and the hold times below follow the Grok Bot iOS app, version 0.18.0.
+The table was extracted by [grok-icon-study](https://github.com/blessonism/grok-icon-study)
+(unofficial; not published by xAI). This firmware does not ship that extract. The poses,
+the gradient and the timing code are written for this project. Blink spacing still follows
+zongzhu-bot, because that schedule is what the host tests lock in; the app's own idle blink
+window is slower (about 6–14 s) and is cited here only as reference.
 
-While a hero face is on screen and the display is awake, the app steps a face clock about
-every 33 ms (about 30 fps). Every other screen stays on the 100 ms frame. Only the rows the
-eyes can touch are flushed, unless the caption or the screen changed, in which case the whole
-hero band is drawn. The disc is painted inside that clip, so an eye-band flush does not leave
-a trail.
+| App state | On this watch | What you see |
+|---|---|---|
+| idle | Ready, boot, short cards, waiting for the user | Neutral circle. Blinks, glances, a slow breath. After the first second, an occasional reaction for about 1.2 s (curious, playful, proud, shy, wink, surprised, wide eyes), then about 3 s of neutral. After about 30 s the body sometimes eases into a pebble, a squircle or a triangle and back |
+| listening, dictating | Microphone recording, and a question | Attentive. The eyes grow with the microphone level |
+| thinking | Waiting for the server, and the status line is empty | The body and the eyes morph into three dots (mid, light, dark). They pulse until the reply starts, then morph back. Looking up is only the start of that morph |
+| working | Thinking, and Hermes sent a status phrase that is not a search | The body stays. The eyes take the curious pose. The headline says Working |
+| searching | Thinking, and the status phrase contains "search" | The body stays. Wide eyes. The headline says Searching |
+| receiving, speaking | TTS playing, before any reply text | The eyes bounce with the speaker level. The first moment back from the three dots is a short surprised pose |
+| loading | Connecting, and a firmware update | A whirl of thin green, teal, purple and yellow elliptical rings around the body. Updating uses a triangle body; connecting keeps the circle |
+| orbit | Mandy relaying to another persona | Not shown. This protocol has no event for that hand-off |
+| alerting | Error, or anything else that needs attention on the error screen | A red exclamation mark and no body |
+| sleeping | Offline for about 7 s, ready and untouched for about 25 s | The body fades to a single dot. Until then, offline is two small sleepy dots on a dim disc |
+| powering-down | The screen has dimmed on its way to the backlight timeout | The same fade to one dot, then the panel turns off as before |
+| waking | Leaving sleep or the dimmed fade, because something happened | The dot grows back into the body over about 0.8 s |
+| happy, celebrate | A successful reply just finished | Two short, nearly level dashes for about 3 s. Celebrate uses the same smile. Text replies wait out the 20 s linger first |
+| confused | The turn failed and there is no reply text | For about 3 s once the face is back: one eye open, the other a flat dash, on the blue body. The notice line is unchanged |
+| other reactions (curious, playful, proud, shy, wink, surprised, and wide eyes) | Occasional idle variety | See idle. Each hold is about 1.2 s, which is the app's onboarding cadence (`k_t` is 1.5 s; the poses' own holds in the extract are longer and are not copied one-for-one) |
 
-The watch's QMI8658 is not read by this firmware, so the face does not parallax with tilt.
+A successful reply arms the smile. A failure arms the confused pose and does not smile.
+There is no separate "server is in a tool" flag. A non-empty `status` phrase is the only
+signal Hermes sends, so working and searching are that phrase, and anything without one
+stays on the three-dot thinking morph.
 
 ## Changing colours and timing
 
@@ -43,34 +52,49 @@ Colours are RGB888 constants in `firmware/core/include/hg/face.hpp`:
 
 | Constant | What it is |
 |---|---|
-| `kBlueR/G/B`, `kBlueHi*`, `kBlueCore*`, `kBlueShade*` | The default disc, its highlight, the small gloss and the lower crescent |
-| `kRed*` | The error disc |
-| `kDim*` | The offline disc |
+| `kBlueHi*`, `kBlue*`, `kBlueShade*` | Light, middle and deep stops of the default gradient. `kBlueCore*` is the lighter gloss mixed into the palette |
+| `kRed*` | The error mark, and the red gradient stops (the idle-red range: light `#F8C4BC`, middle `#EC665E`, deep `#E25A52`) |
+| `kDim*` | The offline gradient, a dimmer blue |
 | `kEye*` | Both pupils |
 
-`rgb565()` quantises them. A colour that is only a few steps from its neighbour can collapse
-to the same 16-bit value.
+`rgb565()` quantises them. The disc adds a Bayer threshold first, so neighbouring stops stay
+distinguishable.
 
 Timings assume one face frame is 33 ms (`kFaceFrameMs` in `firmware/core/src/app.cpp`). The
-schedules are in `firmware/core/src/face.cpp`:
+schedules are in `firmware/core/src/face.cpp` and `app.cpp`:
 
 | Constant | What it changes |
 |---|---|
-| `kBlinkWindow`, `kBlinkBase`, `kBlinkJitter` | Gap between blinks. With the current numbers the gap is 78 to 180 frames, 2.6 s to 6.0 s. Every fifth blink is a double |
+| `kBlinkWindow`, `kBlinkBase`, `kBlinkJitter` | Gap between blinks. With the current numbers the gap is 78 to 180 frames, 2.6 s to 6.0 s. Every fifth blink is a double. Sleep, the error mark and the sleepy offline pose do not blink |
 | the `pulse()` table | Close, hold, open. The current table is 2, 1 and 4 frames, about 70 ms, 30 ms and 140 ms |
 | `kGlanceWindow`, `kGlanceJitter` | Gap between glances, 36 to 104 frames, 1.2 s to 3.5 s. One glance in four stays put |
 | `kEase` | How fast a glance eases in and out (`1 - exp(-dt·k)`, k ≈ 11/s) |
 | `kBreathAmp` | Idle breathing added to the eye height, thousandths of the disc |
 | `kSpeakAmp`, `kSpeakVoice` | Speaking bounce. The base term plus the speaker level, about 5.2 Hz |
-| `kHappyFrames` in `app.cpp` | How long the smile lasts, in face frames (60 is about 2 s) |
+| `kHappyFrames` in `app.cpp` | How long the smile lasts, in face frames (90 is about 3 s) |
+| `kConfusedFrames`, `kSurpriseFrames` | Failed-turn pose, and the short surprise as a voice reply begins |
+| `kFaceSleepReady`, `kFaceSleepOffline` | Frames before the collapse to one dot |
+| `kReactionRest`, `kReactionHold` | Idle variety: rest, then one reaction. The hold matches the ~1.2 s onboarding cadence |
+| `kShapeStart` | Face frame before the body will leave the circle. Early frames stay a circle so a partial flush never has to repaint a morphing silhouette |
 | `kBandAbove`, `kBandBelow` | The rows a partial flush covers. A pose that leaves this band leaves a trail |
 
 Poses are in `pose_left` and `pose_right`. `x`, `y`, `w` and `h` are thousandths of the disc
 diameter, origin at the centre, and `tilt` is degrees clockwise (screen y grows down).
+`UiModel::face_reaction` selects an idle pose on Ready: 1 curious, 2 playful, 3 proud,
+4 shy, 5 wink, 6 surprised, 7 wide, 8 confused. 0 keeps the screen's own pose.
 
 The blink spacing, the one-in-five double blink, the glance spacing and the exponential ease
 are adapted from [zongzhu-bot](https://github.com/Liu-zhongxian/zongzhu-bot) (MIT). The
 drawing is original. See [NOTICE](../NOTICE).
+
+While a hero face is on screen and the display is awake, the app steps a face clock about
+every 33 ms (about 30 fps). Every other screen stays on the 100 ms frame. Only the rows the
+eyes can touch are flushed, unless the body itself is changing (the thinking morph, a shape
+blend, the loading rings, or the sleep collapse), in which case the flush covers the body
+and the rings. The body is painted inside that clip, so an eye-band flush does not leave a
+trail. A settled three-dot pose flushes only the dot row.
+
+The watch's QMI8658 is not read by this firmware, so the face does not parallax with tilt.
 
 Host renders of each state, from the 410×486 watch window:
 
@@ -86,9 +110,21 @@ Host renders of each state, from the 410×486 watch window:
 |---|---|---|---|
 | ![Happy](images/face/happy.png) | ![Blink](images/face/blink.png) | ![Question](images/face/prompt.png) | ![Boot](images/face/boot.png) |
 
+| Sleep | Updating |
+|---|---|
+| ![Sleep](images/face/sleep.png) | ![Updating](images/face/updating.png) |
+
+The expressions on one sheet (neutral through the three-dot pose):
+
+![Face sheet](images/face/sheet.png)
+
 Idle, including a glance and a blink, at the face clock:
 
 ![Idle face](images/face/idle.gif)
+
+Thinking, from the body into the three dots and back:
+
+![Thinking morph](images/face/thinking-morph.gif)
 
 ## The bitmap generator
 
