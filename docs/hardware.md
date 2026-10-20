@@ -79,8 +79,8 @@ The USB-C port is the S3's own USB Serial/JTAG, so flashing and the serial conso
 ### First flash: what to check
 
 1. **Boot log:** `ST7789 240x240 ready`, `codecs: speaker ready, microphones ready`, and in `hermes-gadget diag` an `i2c` list with `0x18` (ES8311) and `0x40` (ES7210). `0x6b` (QMI8658) answers too.
-2. **Screen:** the mascot is centred, upright and not mirrored, and the colours are right (amber accents, not blue). If the image is mirrored, flip `mirror_x`; a one-pixel stripe at an edge means the gap is off. The panel is written for SPI mode 0; Waveshare's own demo uses mode 3, so a blank or garbled screen is a candidate for changing `io_cfg.spi_mode` in `port_display.cpp`.
-3. **Microphone:** say something while holding BOOT; the waves move with your voice and Hermes's transcript is right. The ES7210 is configured here the same way as the AMOLED board (I2S standard mode, MIC1 + MIC2). If the capture is silent or wrong, Waveshare's factory demo drives the ADC in I2S TDM mode (4 slots, `bclk_div` 8) instead, which is the first thing to try.
+2. **Screen:** the face is centred, upright and not mirrored, and the colours are right (amber accents, not blue). If the image is mirrored, flip `mirror_x`; a one-pixel stripe at an edge means the gap is off. The panel is written for SPI mode 0; Waveshare's own demo uses mode 3, so a blank or garbled screen is a candidate for changing `io_cfg.spi_mode` in `port_display.cpp`.
+3. **Microphone:** say something while holding BOOT; the eyes grow with your voice and Hermes's transcript is right. The ES7210 is configured here the same way as the AMOLED board (I2S standard mode, MIC1 + MIC2). If the capture is silent or wrong, Waveshare's factory demo drives the ADC in I2S TDM mode (4 slots, `bclk_div` 8) instead, which is the first thing to try.
 4. **Speaker:** replies are clear and loud enough (`set volume 80`); no hiss between replies.
 5. **Buttons:** BOOT holds to talk, PLUS cancels, and holding PLUS for 2 s starts a new conversation.
 
@@ -111,9 +111,9 @@ For ESP-IDF, use `SDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/waveshare-esp32-
 ### First flash: what to check
 
 1. **Boot log:** `expander resets 0x03 ready`, `ST77916 panel ID …`, `st77916 360x360 ready`, `codecs: speaker ready, microphones ready` and `touch ready`. An unknown panel ID leaves the display off. In `hermes-gadget diag`, the `i2c` list has `0x15`, `0x18`, `0x20` and `0x40`.
-2. **Screen:** the mascot is centred, upright and not mirrored, the whole circle is visible, and the accents are amber, not blue. Brightness and screen timeout work.
+2. **Screen:** the face is centred, upright and not mirrored, the whole circle is visible, and the accents are amber, not blue. Brightness and screen timeout work.
 3. **Touch:** holding the centre and each edge starts a recording; a tap answers yes and a swipe down cancels.
-4. **Microphone:** the waves move with your voice and Hermes's transcript is right.
+4. **Microphone:** the eyes grow with your voice and Hermes's transcript is right.
 5. **Speaker:** replies are clear, with no hiss or pop between them. Cancelling a reply stops it at once, and the next reply plays.
 
 Record the results with the [hardware checklist](hardware-validation.md#record-a-physical-test).
@@ -266,7 +266,7 @@ Or with `idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/tdisplay-s3/sdk
 This port is written from LilyGO's published pinout and examples. On the first flash:
 
 1. **Boot log:** `ST7789 320x170 ready on the i80 bus (gap 0,35)`. In `hermes-gadget diag` the parts line should read `display st7789-i80`.
-2. **Screen:** the mascot is centred, upright and not mirrored. If it is mirrored, swap `mirror_x`/`mirror_y`. A thin stripe at one edge means the gap is off — LilyGO warns that it is panel-specific even within one driver IC, so try neighbouring values and record what your panel needs.
+2. **Screen:** the face is centred, upright and not mirrored. If it is mirrored, swap `mirror_x`/`mirror_y`. A thin stripe at one edge means the gap is off — LilyGO warns that it is panel-specific even within one driver IC, so try neighbouring values and record what your panel needs.
 3. **GPIO 15:** the panel rail. On battery power the screen stays dark unless this pin is high; the driver raises it before initialising the panel.
 4. **Buttons:** BOOT is TALK and Button2 cancels. With no microphone, holding TALK flashes "Microphone unavailable" — that is expected on this board, not a fault.
 5. **Text:** `say hello` over the console, or a paired Hermes, should render on the display.
@@ -324,10 +324,10 @@ This port is written from Waveshare's published pinout and drivers. On the first
 
 1. **Boot log:** `CO5300 466x466 ready`, `codecs: speaker ready, microphones ready` and `touch ready, key ready`. A `did not answer` or `missing` line names the part to look at. The `hg.diag` lines sum it up: reset reason, memory, and `parts: display co5300, microphone es7210, speaker es8311, touch yes, key yes`. In the `diag` report, `i2c` should include `0x18` (ES8311), `0x20` (TCA9554), `0x34` (AXP2101), `0x40` (ES7210) and `0x5a` (CST9217).
 2. **Console:** `hermes-gadget console --port COMx` on the USB-C port answers `status`. If the log shows but commands get no answer, the console is still on UART0.
-3. **Screen:** the mascot is centred, upright and not mirrored, and the colours are right (amber accents, not blue). A thin stripe at one edge means the column offset is off.
-4. **Touch:** hold the screen and the listening waves appear; a swipe *down* (not up) cancels. A reversed swipe means the touch mirroring needs flipping.
+3. **Screen:** the face is centred, upright and not mirrored, and the colours are right (amber accents, not blue). A thin stripe at one edge means the column offset is off.
+4. **Touch:** hold the screen and the listening face appears; a swipe *down* (not up) cancels. A reversed swipe means the touch mirroring needs flipping.
 5. **PWR key:** a short press cancels and holding 2 s starts a new conversation without powering the board off.
-6. **Microphone:** say something; the waves move with your voice, and Hermes's transcript is right.
+6. **Microphone:** say something; the eyes grow with your voice, and Hermes's transcript is right.
 7. **Speaker:** replies are clear and loud enough (`set volume 80`); no hiss between replies.
 
 ## ESP32-S3-Touch-AMOLED-1.8
@@ -365,9 +365,9 @@ The USB-C port is the S3's own USB Serial/JTAG, used for both flashing and the s
 A smoke test on a V2 board confirmed the boot, the display and the I2C devices, and the codec, touch, speaker and microphone tasks started; touch, microphone capture, speaker playback and battery are untested (see [hardware validation](hardware-validation.md)). On the first flash, check:
 
 1. **Boot log:** `CO5300 368x448 ready`, `expander resets 0x07 ready`, `codecs: speaker ready, microphones ready (es8311 analog)` and `touch ready, key off, encoder off`. The `hg.diag` lines should read `parts: display co5300, microphone es8311, speaker es8311, touch yes, key no`. In the `diag` report, `i2c` should include `0x15` (CST820), `0x18` (ES8311), `0x20` (TCA9554) and `0x34` (AXP2101). There is no ES7210 on this board.
-2. **Screen:** the mascot is upright and not mirrored, and the colours are right (amber accents, not blue); a stripe at one edge means the column offset is off. If the image is shifted or the panel stays dark, the vendor init table is the first thing to revisit.
-3. **Touch:** holding the screen shows the listening waves and a swipe *down* cancels. If the coordinates are mirrored, flip `touch.mirror_x`/`mirror_y` in `board.cpp`.
-4. **Microphone:** say something; the waves move with your voice and Hermes's transcript is right. The ES8311 analog input path is the part most likely to need its gain adjusted.
+2. **Screen:** the face is upright and not mirrored, and the colours are right (amber accents, not blue); a stripe at one edge means the column offset is off. If the image is shifted or the panel stays dark, the vendor init table is the first thing to revisit.
+3. **Touch:** holding the screen shows the listening face and a swipe *down* cancels. If the coordinates are mirrored, flip `touch.mirror_x`/`mirror_y` in `board.cpp`.
+4. **Microphone:** say something; the eyes grow with your voice and Hermes's transcript is right. The ES8311 analog input path is the part most likely to need its gain adjusted.
 5. **Speaker:** replies are clear and loud enough (`set volume 80`); no hiss between replies.
 
 The CO5300 start-up table comes from Waveshare's [board support package](https://github.com/waveshareteam/Waveshare-ESP32-components/tree/9f4030c6e5cb888ad4cc268bfa7584c93ad53e30/bsp/esp32_s3_touch_amoled_1_8) at commit `9f4030c`; see [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES.md).
@@ -409,8 +409,8 @@ The USB-C port is the S3's own USB Serial/JTAG, used for both flashing and the s
 ### First flash: what to check
 
 1. **Boot log:** `CO5300 410x486 ready`, `codecs: speaker ready, microphones ready`, `touch read on INT (GPIO 38)` and `touch ready, key off, encoder off`. In the `diag` report, `i2c` should include `0x18` (ES8311), `0x34` (AXP2101), `0x40` (ES7210), `0x51` (PCF85063) and `0x6b` (QMI8658). `0x38` (FT3168) is listed only while the touch chip is awake: it dozes after a few idle seconds and doesn't answer then.
-2. **Screen:** the mascot is upright and not mirrored; text is white on dark slate bars, and the link dot is green once online. A stripe at one edge means the column offset is off. Text clipped by a rounded corner means `corner_inset` needs raising.
-3. **Touch:** holding the screen shows the listening waves, and a swipe *down* cancels. Report mirrored coordinates with the board revision; this FT5x06 adapter does not apply `touch.mirror_x` or `touch.mirror_y`. If they are 8 rows off, adjust `touch.offset_y`.
+2. **Screen:** the face (a blue disc and two dark eyes) is centred and not mirrored; text is white on dark slate bars, and the link dot is green once online. An error turns the disc red. A stripe at one edge means the column offset is off. Text clipped by a rounded corner means `corner_inset` needs raising.
+3. **Touch:** holding the screen shows the listening face, and a swipe *down* cancels. Report mirrored coordinates with the board revision; this FT5x06 adapter does not apply `touch.mirror_x` or `touch.mirror_y`. If they are 8 rows off, adjust `touch.offset_y`.
 4. **Microphones:** say something. The waves move with your voice and the transcript is right; in tap mode, a sentence spoken at arm's length starts and ends the recording.
 5. **Speaker:** replies are clear and loud enough (`set volume 80`), with no hiss between replies.
 6. **Power:** a short PWR press toggles the screen, and the battery reading appears with a cell attached.
@@ -449,8 +449,8 @@ The USB-C port is the S3's own USB Serial/JTAG, used for both flashing and the s
 ### First flash: what to check
 
 1. **Boot log:** `CO5300 480x480 ready`, `codecs: speaker ready, microphones ready`, plus `touch ready, key off, encoder off`. In the `diag` report, `i2c` should include `0x18` (ES8311), `0x34` (AXP2101), `0x40` (ES7210), `0x51` (PCF85063), `0x5a` (CST9220) and `0x6b` (QMI8658).
-2. **Screen:** the mascot is upright and not mirrored; text is white on dark slate bars, and the link dot is green once online. A stripe at one edge means the column offset is off.
-3. **Touch:** holding the screen shows the listening waves, and a swipe *down* cancels. Report mirrored or offset coordinates with the board revision.
+2. **Screen:** the face is upright and not mirrored; text is white on dark slate bars, and the link dot is green once online. A stripe at one edge means the column offset is off.
+3. **Touch:** holding the screen shows the listening face, and a swipe *down* cancels. Report mirrored or offset coordinates with the board revision.
 4. **Microphones:** say something. The waves move with your voice and the transcript is right; in tap mode, a sentence spoken at arm's length starts and ends the recording.
 5. **Speaker:** replies are clear and loud enough (`set volume 80`), with no hiss between replies.
 
@@ -487,8 +487,8 @@ The profile expects the USB-C port to be the S3's own USB Serial/JTAG, used for 
 ### First flash: what to check
 
 1. **Boot log:** `battery latch enabled; no battery voltage reading` and `codecs: speaker ready, microphones ready (es8311 analog)`. The `hg.diag` parts line should read `display st7789, microphone es8311, speaker es8311`.
-2. **Screen:** the mascot is upright and not mirrored, and the colors are right (amber accents, not blue). Swapped red and blue means `lcd.bgr` in `board.cpp` is wrong.
-3. **Microphone:** hold BOOT and speak; the waves move with your voice and Hermes's transcript is right.
+2. **Screen:** the face is upright and not mirrored, and the colors are right (amber accents, not blue). Swapped red and blue means `lcd.bgr` in `board.cpp` is wrong.
+3. **Microphone:** hold BOOT and speak; the eyes grow with your voice and Hermes's transcript is right.
 4. **Speaker:** replies are clear and loud enough (`set volume 80`).
 5. **Power:** unplug USB with the battery in, and the device stays on. **Power off** in settings turns it off.
 6. **Console:** `hermes-gadget diag` answers over the USB-C port.
@@ -535,10 +535,10 @@ The USB-C port is the S3's own USB Serial/JTAG, used for flashing and the serial
 ### First flash: what to check
 
 1. **Boot log:** `battery latch enabled; calibrated voltage available` and `codecs: speaker ready, microphones ready (es8311 analog)`. The `hg.diag` parts line should read `display st7789, microphone es8311, speaker es8311`, with touch ready on the touch version.
-2. **Screen:** the mascot is upright and not mirrored, and the colors are right (amber accents, not blue). Swapped red and blue means `lcd.bgr` is wrong; a negative-looking image means `lcd.invert` is.
+2. **Screen:** the face is upright and not mirrored, and the colors are right (amber accents, not blue). Swapped red and blue means `lcd.bgr` is wrong; a negative-looking image means `lcd.invert` is.
 3. **Brightness:** the settings menu's brightness steps dim the screen, and 100 percent is the brightest. Reversed steps mean `lcd.backlight_invert` is wrong.
 4. **Touch:** holding the screen records, a swipe down cancels, and taps land where you touch.
-5. **Microphone:** hold BOOT and speak; the waves move with your voice and Hermes's transcript is right.
+5. **Microphone:** hold BOOT and speak; the eyes grow with your voice and Hermes's transcript is right.
 6. **Speaker:** replies are clear and loud enough (`set volume 80`).
 7. **Power:** unplug USB with the battery in, and the device stays on. **Battery and power** then shows the voltage and "Not charging", and `diag` reports `"external_power":false`; plugged into a computer it reports charging and external power. **Power off** in settings turns it off.
 
@@ -581,10 +581,10 @@ The USB-C port is the S3's own USB Serial/JTAG, used for flashing and the serial
 ### First flash: what to check
 
 1. **Boot log:** `battery latch enabled; calibrated voltage available` and `codecs: speaker ready, microphones ready (es8311 analog)`. The `hg.diag` parts line should read `display gc9a01, microphone es8311, speaker es8311`, with touch ready.
-2. **Screen:** the mascot is upright, not mirrored, and centred in the circle, and the colors are right (amber accents, not blue). Swapped red and blue means `lcd.bgr` is wrong; a negative-looking image means `lcd.invert` is; a mirrored picture means `lcd.mirror_x` is. Faint or washed-out colors point at the register changes in `panel_spotpear128.hpp`.
+2. **Screen:** the face is upright, not mirrored, and centred in the circle, and the colors are right (amber accents, not blue). Swapped red and blue means `lcd.bgr` is wrong; a negative-looking image means `lcd.invert` is; a mirrored picture means `lcd.mirror_x` is. Faint or washed-out colors point at the register changes in `panel_spotpear128.hpp`.
 3. **Brightness:** the settings menu's brightness steps dim the screen, and 100 percent is the brightest. Reversed steps mean `lcd.backlight_invert` is wrong.
 4. **Touch:** holding the screen records, a swipe down cancels, and taps land where you touch. A swipe that reads backwards means the touch needs `touch.mirror_x` or `touch.mirror_y`.
-5. **Microphone:** hold BOOT and speak; the waves move with your voice and Hermes's transcript is right.
+5. **Microphone:** hold BOOT and speak; the eyes grow with your voice and Hermes's transcript is right.
 6. **Speaker:** replies are clear and loud enough (`set volume 80`).
 7. **Battery:** with a charged cell, `hermes-gadget diag` reports about 4.0 to 4.2 V. A reading far off means the divider ratio is wrong. The charging mark shows on USB and goes away on battery; if it is the wrong way round, clear `latch_power.charging_active_high`.
 8. **Power:** unplug USB with the battery in, and the device stays on. **Power off** in settings turns it off.
@@ -627,10 +627,10 @@ pio run -e esp-vocat -t upload -t monitor
 ### First flash: what to check
 
 1. **Boot log:** the `hg.lcd` line reads `st77916 360x360 ready` after the panel ID, and the `hg.diag` parts line reads `display st77916, microphone es7210, speaker es8311`, with touch ready.
-2. **Screen:** the mascot is upright, centred in the circle and not mirrored, and the colors are right (amber accents, not blue). A negative-looking image means `lcd.invert` is wrong.
+2. **Screen:** the face is upright, centred in the circle and not mirrored, and the colors are right (amber accents, not blue). A negative-looking image means `lcd.invert` is wrong.
 3. **Brightness:** the settings menu's brightness steps dim the screen, and 100 percent is the brightest.
 4. **Touch:** holding the screen records, a swipe down cancels, and taps land where you touch.
-5. **Microphone:** hold the screen and speak; the waves move with your voice and Hermes's transcript is right.
+5. **Microphone:** hold the screen and speak; the eyes grow with your voice and Hermes's transcript is right.
 6. **Speaker:** replies are clear and loud enough (`set volume 80`).
 
 The pin map follows Espressif's esp-bsp `bsp/esp_vocat` at commit `f259a6a` and the ESP-VoCat v1.2 schematic; the panel's start-up table comes from the same BSP. See [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES.md).
@@ -664,9 +664,9 @@ Or with `idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/crowpanel-21/sd
 This port is written from Elecrow's published factory example ([CrowPanel repository](https://github.com/Elecrow-RD/CrowPanel-2.1inch-HMI-ESP32-Rotary-Display-480-480-IPS-Round-Touch-Knob-Screen)). On the first flash:
 
 1. **Boot log:** `ST7701 480x480 RGB panel initialized at 12000000 Hz`, `touch ready, key ready, encoder ready`, and `parts: display st7701-rgb, ... touch yes, key yes`.
-2. **Screen:** the mascot is centred inside the circle and not mirrored; colours are right (amber accents, not blue). A red/blue swap means the RGB565 channel order needs flipping.
+2. **Screen:** the face is centred inside the circle and not mirrored; colours are right (amber accents, not blue). A red/blue swap means the RGB565 channel order needs flipping.
 3. **Brightness:** cycle 10 → 100 in settings; brightness must rise with the number. The backlight PWM is active-high — do not set `backlight_invert`.
-4. **Touch:** hold the screen and the listening waves appear; a swipe down cancels; hold the title bar one second for settings.
+4. **Touch:** hold the screen and the listening face appears; a swipe down cancels; hold the title bar one second for settings.
 5. **Knob:** each detent moves one settings item or scrolls a long reply, and the first detent wakes a dark screen; pressing the knob cancels. If the direction is reversed, swap the encoder's A and B pins in `board.cpp`.
 6. **Text:** `say hello` over the console, or a paired Hermes, should render on the display.
 
@@ -698,9 +698,9 @@ Or with `idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;boards/crowpanel-5.0/sd
 This port is written from Elecrow's published factory example ([CrowPanel 5.0 repository](https://github.com/Elecrow-RD/CrowPanel-5.0-HMI-ESP32-Display-800x480) at commit `fd959ac`). On the first flash:
 
 1. **Boot log:** `ILI6122 800x480 RGB panel initialized at 15000000 Hz` and `touch ready`; `parts: display ili6122-rgb, ... touch yes`.
-2. **Screen:** the mascot renders and colours are correct (amber accents, not blue). A red/blue swap means `b.lcd.rgb.swap_red_blue` in this board's `board.cpp` entry needs flipping.
+2. **Screen:** the face renders and colours are correct (amber accents, not blue). A red/blue swap means `b.lcd.rgb.swap_red_blue` in this board's `board.cpp` entry needs flipping.
 3. **Brightness:** cycle 10 → 100 in settings; brightness must rise with the number. The backlight is active-high — do not set `backlight_invert`.
-4. **Touch:** hold the screen and the listening waves appear; a swipe down cancels; hold the title bar one second for settings.
+4. **Touch:** hold the screen and the listening face appears; a swipe down cancels; hold the title bar one second for settings.
 5. **Text:** `say hello` over the console, or a paired Hermes, should render on the display.
 
 Panel timings (15 MHz PCLK, 8/4/43 and 8/4/12 porches, `pclk_active_neg`) and the pin map follow the factory `crowpanel-esp32-5.0-3.0` Arduino example at commit `fd959ac`; see [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES.md). A boot smoke check passed on a real board: the panel initialization log, the GT911's ID, Wi-Fi and pairing. Rendering, colours, brightness and touch coordinates are not yet verified; see the [hardware validation table](hardware-validation.md).

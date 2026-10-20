@@ -1,6 +1,6 @@
 # Mascot art
 
-The device and this project's logo use the Hermes Agent mascot: the girl with the headphones.
+The project logo uses the Hermes Agent mascot: the girl with the headphones. The device screen draws a procedural face instead; see [docs/faces.md](../../docs/faces.md). The 1-bit frames below are still generated, and the UI does not draw them.
 
 `nous-girl-white-1024.png` is Hermes Agent's dark-background artwork (`assets/nous-girl-white.svg` in the Hermes Agent repository), rendered to 1024×1024 RGBA. The art is slightly taller than wide, so it sits inside the square with transparent padding.
 

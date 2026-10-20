@@ -31,6 +31,9 @@ class Canvas {
   void rect(int x, int y, int w, int h, uint16_t color);
   void fill_round_rect(int x, int y, int w, int h, int r, uint16_t color);
   void fill_circle(int cx, int cy, int r, uint16_t color);
+  // Stadium (capsule) of half-width hw and half-height hh, rotated clockwise
+  // by tilt_deg. Screen y grows downward. hw/hh below 1 are drawn as 1.
+  void fill_tilted_capsule(int cx, int cy, int hw, int hh, int tilt_deg, uint16_t color);
   void ring(int cx, int cy, int r, int thickness, uint16_t color);
   // The part of a ring facing right (dir > 0) or left (dir < 0), about +-55 degrees.
   void arc(int cx, int cy, int r, int thickness, int dir, uint16_t color);

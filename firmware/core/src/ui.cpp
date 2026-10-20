@@ -5,6 +5,7 @@
 #include <cstring>
 #include <vector>
 
+#include "hg/face.hpp"
 #include "hg/font.hpp"
 
 namespace hg {
@@ -22,8 +23,6 @@ constexpr uint16_t kBlue = rgb565(90, 169, 242);
 constexpr uint16_t kRed = rgb565(242, 95, 92);
 constexpr uint16_t kYellow = rgb565(242, 201, 76);
 constexpr uint16_t kGreenDim = rgb565(28, 92, 62);
-constexpr uint16_t kBlueDim = rgb565(52, 96, 140);
-constexpr uint16_t kAccentDim = rgb565(110, 82, 30);
 constexpr uint16_t kRedDim = rgb565(122, 44, 44);
 
 class Hash {
@@ -81,27 +80,12 @@ int tri(uint32_t frame, int period) {
   return p < period / 2 ? p : period - p;
 }
 
-mascot::Frame mascot_frame(const UiModel& m) {
-  if (m.screen == Screen::Responding && m.speaking) {
-    return (m.frame / 2) % 2 ? mascot::Frame::Talk : mascot::Frame::Idle;
-  }
-  return m.frame % 45 < 2 ? mascot::Frame::Blink : mascot::Frame::Idle;  // blink every ~4.5 s
-}
-
-// Everything that changes hero pixels between frames, and nothing else, so
-// a still mascot never triggers a redraw.
-uint32_t hero_anim_key(const UiModel& m) {
-  Hash h;
-  h.val(mascot_frame(m));
-  switch (m.screen) {
-    case Screen::Listening: h.val(m.frame % 3).val(m.level / 20); break;
-    case Screen::Thinking:
-    case Screen::Connecting:
-    case Screen::Updating: h.val((m.frame / 2) % 4); break;
-    case Screen::Responding: h.val((m.frame / 2) % 3); break;
-    default: break;
-  }
-  return h.get();
+// Everything that changes hero pixels between frames, and nothing else, so a
+// settled face does not flush. The disc colour follows the screen and is part
+// of the static key, not this one.
+uint32_t hero_anim_key(const UiModel& m, int diameter) {
+  return face::picture_key(m.face_frame, face::mood_for(m.screen, m.face_happy), m.level, m.voice,
+                           face::dots_for(m.screen), diameter);
 }
 
 uint16_t tone_color(DashRow::Tone t) {
@@ -185,7 +169,7 @@ Ui::Ui(Display& display)
   layout_.body_cols = cols_for(w - 2 * margin, s);
   layout_.body_rows = std::max(1, (content_h - margin) / Canvas::line_height(s));
 
-  // Hero layout: the mascot is sized per screen (see hero_geom).
+  // Hero layout: the face is sized per screen (see hero_geom).
   layout_.hero_cols = cols_for(w - 4 * s, s);
 }
 
@@ -273,7 +257,7 @@ void Ui::draw_frame(const UiModel& m) {
   hashes[3] = Hash().add(m.hint).get();
 
   if (m.hero) {
-    // Hero mode: top bar, one mascot band, bottom bar.
+    // Hero mode: top bar, one face band, bottom bar.
     for (int i : {0, 3}) {
       if (valid_ && hash_[i] == hashes[i]) continue;
       int y0 = i == 0 ? 0 : y_bottom, y1 = i == 0 ? y_header : h;
@@ -284,7 +268,8 @@ void Ui::draw_frame(const UiModel& m) {
       hash_[i] = hashes[i];
     }
     uint32_t stat = Hash().val(m.screen).add(m.headline).add(m.detail).add(m.yes).add(m.no).val(m.caption_lines).get();
-    uint32_t anim = hero_anim_key(m);
+    const int face_d = hero_geom(m).size;
+    uint32_t anim = hero_anim_key(m, face_d);
     int y0 = y_header, y1 = y_bottom;
     bool redraw = !valid_ || !hero_valid_ || stat != hero_static_;
     if (!redraw && anim != hero_anim_) {
@@ -705,20 +690,22 @@ Ui::HeroGeom Ui::hero_geom(const UiModel& m) const {
   if (!m.detail.empty()) g.detail = wrap_text(m.detail, cols);
   const int buttons_h = m.yes.empty() && m.no.empty() ? 0 : lh + 6 * s;
   auto caption_h = [&](int lines) { return (1 + lines) * lh + s; };
-  // Never shrink the mascot below the smallest bitmap: drop caption lines instead.
-  const int smallest = mascot::pick(0, mascot::Frame::Idle)->size;
+  // Drop caption lines before the face gets too small to read.
+  constexpr int kSmallestFace = 48;
   int max_lines = std::max(1, static_cast<int>(m.caption_lines));
-  while (max_lines > 1 && layout_.main_h - caption_h(max_lines) - buttons_h - 4 * s < smallest) --max_lines;
+  while (max_lines > 1 && layout_.main_h - caption_h(max_lines) - buttons_h - 4 * s < kSmallestFace) --max_lines;
   if (static_cast<int>(g.detail.size()) > max_lines) {
     g.detail.resize(static_cast<size_t>(max_lines));
     std::string& last = g.detail.back();
     if (static_cast<int>(last.size()) + 2 > cols) last.resize(static_cast<size_t>(std::max(0, cols - 2)));
     last += "..";
   }
-  // Reserve one detail line even when there is none, so the mascot keeps its size.
+  // Reserve one detail line even when there is none, so the face keeps its size.
   const int ch = caption_h(std::max<int>(1, static_cast<int>(g.detail.size())));
   const int avail = std::min(w - 8 * s, layout_.main_h - ch - buttons_h - 4 * s);
-  g.size = mascot::pick(avail, mascot::Frame::Idle)->size;
+  // A margin around the disc keeps the dark field, and keeps side pixels of a
+  // round panel clear of the face.
+  g.size = std::max(16, avail * 9 / 10);
   const int block = g.size + 2 * s + ch + buttons_h;
   g.x = (w - g.size) / 2;
   g.y = layout_.main_y + std::max(s, (layout_.main_h - block) / 2);
@@ -729,37 +716,11 @@ Ui::HeroGeom Ui::hero_geom(const UiModel& m) const {
 
 void Ui::hero_anim_rows(const UiModel& m, int& y0, int& y1) const {
   const HeroGeom g = hero_geom(m);
-  const int size = g.size, my = g.y;
-  const mascot::Anchors& a = mascot::anchors();
-  int top = my + size * a.eyes_y0 / 1000, bottom = my + size * a.eyes_y1 / 1000;
-  auto add = [&](int lo, int hi) {
-    top = std::min(top, lo);
-    bottom = std::max(bottom, hi);
-  };
-  const int reach = size * 280 / 1000;  // outermost wave radius + stroke
-  switch (m.screen) {
-    case Screen::Listening: {
-      int ey = my + size * a.ear_cup.y / 1000;
-      add(ey - reach, ey + reach);
-      break;
-    }
-    case Screen::Responding: {
-      int mouth = my + size * a.mouth.y / 1000;
-      add(my + size * a.mouth_y0 / 1000, my + size * a.mouth_y1 / 1000);
-      add(mouth - reach, mouth + reach);
-      break;
-    }
-    case Screen::Thinking:
-    case Screen::Connecting:
-    case Screen::Updating: {
-      int ty = my + size * a.head_top_right.y / 1000;
-      add(ty - size / 6, ty + size / 12);
-      break;
-    }
-    default: break;
-  }
-  y0 = std::max(top - 1, layout_.top_h);
-  y1 = std::min(bottom + 2, static_cast<int>(info_.height) - layout_.bottom_h);
+  int top = 0, bottom = 0;
+  face::anim_rows(g.y + g.size / 2, g.size, top, bottom);
+  y0 = std::max(top, layout_.top_h);
+  y1 = std::min(bottom, static_cast<int>(info_.height) - layout_.bottom_h);
+  if (y1 < y0) y1 = y0;
 }
 
 void Ui::draw_hero(Canvas& c, const UiModel& m) {
@@ -771,48 +732,8 @@ void Ui::draw_hero(Canvas& c, const UiModel& m) {
   c.fill_rect(0, y0, w, y1 - y0, bg_);
 
   const HeroGeom g = hero_geom(m);
-  const int size = g.size, mx = g.x, my = g.y;
-  const mascot::Anchors& a = mascot::anchors();
-  if (const mascot::Bitmap* b = mascot::pick(size, mascot_frame(m))) {
-    c.bitmap1(mx, my, b->size, b->size, b->bits, kText);
-  }
-  const int stroke = std::max(2, size / 48);
-  auto waves = [&](int cx, int cy, int dir, int lit, int phase, uint16_t on, uint16_t dim, int r0) {
-    for (int i = 0; i < 3; ++i) {
-      int r = size * (r0 + 60 * i) / 1000;
-      uint16_t col = i >= lit ? kFaint : (i == phase ? on : dim);
-      c.arc(cx, cy, r, stroke, dir, col);
-    }
-  };
-  auto dots = [&](uint16_t on, uint16_t dim) {
-    int r = std::max(2, size / 30);
-    int gap = 3 * r;
-    int tx = mx + size * a.head_top_right.x / 1000;
-    int ty = my + size * a.head_top_right.y / 1000;
-    int active = static_cast<int>((m.frame / 2) % 4);
-    for (int i = 0; i < 3; ++i) {
-      c.fill_circle(tx + i * gap, ty - i * gap / 2, r, i == active ? on : dim);
-    }
-  };
-  switch (m.screen) {
-    case Screen::Listening: {
-      int lit = 1 + std::min(2, m.level / 34);
-      waves(mx + size * a.ear_cup.x / 1000, my + size * a.ear_cup.y / 1000, +1, lit,
-            static_cast<int>(m.frame % 3), kGreen, kGreenDim, 90);
-      break;
-    }
-    case Screen::Responding:
-      if (m.speaking) {
-        // Start outside the face outline so the waves read as sound, not as lines on her cheek.
-        waves(mx + size * a.mouth.x / 1000, my + size * a.mouth.y / 1000, -1, 3,
-              static_cast<int>((m.frame / 2) % 3), kAccent, kAccentDim, 130);
-      }
-      break;
-    case Screen::Thinking: dots(kBlue, kBlueDim); break;
-    case Screen::Connecting:
-    case Screen::Updating: dots(kAccent, kAccentDim); break;
-    default: break;
-  }
+  face::draw(c, g.x + g.size / 2, g.y + g.size / 2, g.size, m.screen, m.face_happy, m.face_frame, m.level,
+             m.voice);
 
   // Caption: headline, then the detail lines, centred.
   const int cols = layout_.hero_cols;

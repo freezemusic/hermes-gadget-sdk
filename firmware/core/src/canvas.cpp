@@ -58,6 +58,77 @@ void Canvas::fill_circle(int cx, int cy, int r, uint16_t color) {
   }
 }
 
+namespace {
+
+// cos(0..90 degrees) in 256ths. sin(d) = cos(90-d).
+constexpr int16_t kCos256[91] = {
+    256, 256, 256, 256, 255, 255, 255, 254, 254, 253, 252, 251, 250, 249, 248, 247, 246, 245, 243, 242, 241,
+    239, 237, 236, 234, 232, 230, 228, 226, 224, 222, 219, 217, 215, 212, 210, 207, 204, 202, 199, 196, 193,
+    190, 187, 184, 181, 178, 175, 171, 168, 165, 161, 158, 154, 150, 147, 143, 139, 136, 132, 128, 124, 120,
+    116, 112, 108, 104, 100, 96,  92,  88,  83,  79,  75,  71,  66,  62,  58,  53,  49,  44,  40,  36,  31,
+    27,  22,  18,  13,  9,   4,   0};
+
+void sincos256(int deg, int& s, int& c) {
+  while (deg < 0) deg += 360;
+  deg %= 360;
+  const int q = deg / 90;
+  const int d = deg % 90;
+  const int sinv = q & 1 ? kCos256[d] : kCos256[90 - d];
+  const int cosv = q & 1 ? kCos256[90 - d] : kCos256[d];
+  s = q == 0 || q == 1 ? sinv : -sinv;
+  c = q == 0 || q == 3 ? cosv : -cosv;
+}
+
+bool in_stadium(int lx, int ly, int hw, int hh) {
+  const int ax = lx < 0 ? -lx : lx;
+  const int ay = ly < 0 ? -ly : ly;
+  if (hh >= hw) {
+    const int inner = hh - hw;
+    if (ay <= inner) return ax <= hw;
+    const int dy = ay - inner;
+    return ax * ax + dy * dy <= hw * hw;
+  }
+  const int inner = hw - hh;
+  if (ax <= inner) return ay <= hh;
+  const int dx = ax - inner;
+  return dx * dx + ay * ay <= hh * hh;
+}
+
+}  // namespace
+
+void Canvas::fill_tilted_capsule(int cx, int cy, int hw, int hh, int tilt_deg, uint16_t color) {
+  if (hw < 1) hw = 1;
+  if (hh < 1) hh = 1;
+  int s = 0, c = 256;
+  sincos256(tilt_deg, s, c);
+  const int ext = hw + hh + 1;
+  for (int y = cy - ext; y <= cy + ext; ++y) {
+    const int dy = y - cy;
+    int x0 = 0;
+    bool any = false;
+    for (int dx = -ext; dx <= ext; ++dx) {
+      const int lx = (dx * c + dy * s) >> 8;
+      const int ly = (-dx * s + dy * c) >> 8;
+      if (in_stadium(lx, ly, hw, hh)) {
+        x0 = cx + dx;
+        any = true;
+        break;
+      }
+    }
+    if (!any) continue;
+    int x1 = x0;
+    for (int dx = ext; dx >= x0 - cx; --dx) {
+      const int lx = (dx * c + dy * s) >> 8;
+      const int ly = (-dx * s + dy * c) >> 8;
+      if (in_stadium(lx, ly, hw, hh)) {
+        x1 = cx + dx;
+        break;
+      }
+    }
+    fill_rect(x0, y, x1 - x0 + 1, 1, color);
+  }
+}
+
 void Canvas::ring(int cx, int cy, int r, int thickness, uint16_t color) {
   int inner = std::max(0, r - thickness);
   for (int dy = -r; dy <= r; ++dy) {

@@ -419,6 +419,12 @@ class App {
   crypto::Sha256 ota_hash_;
 
   uint32_t frame_at_ = 0;
+  uint32_t face_at_ = 0;
+  uint32_t face_frame_ = 0;
+  uint8_t voice_ = 0;       // last speaker block, 0..100, decays between blocks
+  uint32_t voice_at_ = 0;
+  bool happy_arm_ = false;  // a successful turn wants a smile the next time the face shows
+  uint32_t happy_until_ = 0;  // face frame the smile runs until; 0 = off
 
   // frame timing: the running statistics while `perf` is on, and the bench
   std::unique_ptr<FrameStats> frame_stats_;

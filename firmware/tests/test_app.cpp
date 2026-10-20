@@ -777,7 +777,7 @@ TEST("app: sensor readings are reported, rate limited") {
   CHECK(r.fake.last("state") != nullptr);
 }
 
-TEST("app: the mascot fills idle, listening and thinking screens") {
+TEST("app: the face fills idle, listening and thinking screens") {
   Rig r;
   r.bring_online(true);
   CHECK(r.app.model().hero);  // idle
@@ -786,14 +786,14 @@ TEST("app: the mascot fills idle, listening and thinking screens") {
   r.advance(500);
   r.app.on_button(hg::Button::Talk, false);
   CHECK(r.app.screen() == hg::Screen::Thinking && r.app.model().hero);
-  // Audio before text: the mascot speaks; text arrives: the reply takes the screen.
+  // Audio before text: the face speaks; text arrives: the reply takes the screen.
   r.server(R"({"type":"audio.start","stream":2,"rate":16000,"format":"pcm16"})");
   CHECK(r.app.screen() == hg::Screen::Responding && r.app.model().hero);
   r.server(R"({"type":"reply","text":"Done."})");
   CHECK(!r.app.model().hero);
 }
 
-TEST("app: a finished reply stays readable, then the mascot returns; UP brings it back") {
+TEST("app: a finished reply stays readable, then the face returns; UP brings it back") {
   Rig r;
   r.bring_online(true);
   r.server(R"({"type":"turn.start","turn":"t"})");
@@ -819,8 +819,10 @@ TEST("app: hero animation redraws only a slice of the screen") {
   flushes = r.fake.flushes - flushes;
   rows = r.fake.flushed_rows - rows;
   CHECK(flushes > 0);
-  // Each blink flushes only the eye rows (~25 of the 196-row mascot area).
-  CHECK(rows / flushes < 60);
+  // Blinks and glances flush the eye band, not the whole hero area (~196 rows
+  // on this 320x240 panel). The disc itself stays put.
+  CHECK(rows / flushes < 90);
+  CHECK(rows / flushes < r.fake.height / 2);
 }
 
 TEST("app: holding CANCEL starts a new session; a short press still cancels") {
@@ -869,7 +871,7 @@ TEST("app: rendering is deterministic for the same model") {
   CHECK(a.fake.flushes > 0);
 }
 
-TEST("app: a question from Hermes shows the mascot with TALK/CANCEL answers") {
+TEST("app: a question from Hermes shows the face with TALK/CANCEL answers") {
   Rig r;
   r.bring_online(true);
   r.server(R"({"type":"turn.start","turn":"t"})");
@@ -939,7 +941,7 @@ TEST("app: a question waits for a recording, and can be withdrawn or expire") {
   CHECK(r.app.console("no") == "@error no question to answer");
 }
 
-TEST("app: connection, pairing and setup screens show the mascot") {
+TEST("app: connection, pairing and setup screens show the face") {
   Rig r;
   r.app.begin();
   r.app.on_network(true, "wifi");
@@ -961,7 +963,7 @@ TEST("app: connection, pairing and setup screens show the mascot") {
   CHECK(unset.app.screen() == hg::Screen::Error && unset.app.model().hero);
 }
 
-TEST("app: short cards sit under the mascot, long ones use the text layout") {
+TEST("app: short cards sit under the face, long ones use the text layout") {
   Rig r;
   r.bring_online(true);
   r.server(R"({"type":"display","title":"Timer","body":"Pasta: 9 min"})");
@@ -1002,7 +1004,7 @@ TEST("app: long replies page themselves; UP/DOWN pauses the paging") {
   CHECK_EQ(r.app.model().scroll, manual);  // paused after a manual scroll
   CHECK(!r.app.model().hero);              // and the reply is still on screen
 
-  // Paging stops at the last page, which stays readable before the mascot returns.
+  // Paging stops at the last page, which stays readable before the face returns.
   int last = -1;
   for (int i = 0; i < 40 && r.app.model().scroll != last; ++i) {
     last = r.app.model().scroll;
@@ -1763,7 +1765,7 @@ TEST("display: an emissive panel leaves its background unlit; a backlit one keep
     ui.render(m);
     const uint16_t corner = display.fb[0], centre_edge = display.fb[static_cast<size_t>(233 * 466 + 120)];
     CHECK_EQ(corner == 0, emissive);  // outside the UI square
-    CHECK_EQ(centre_edge == 0, emissive);  // inside it, beside the mascot
+    CHECK_EQ(centre_edge == 0, emissive);  // inside it, beside the face
   }
 }
 

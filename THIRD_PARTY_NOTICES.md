@@ -28,6 +28,10 @@ The dependencies below keep their own licenses and are downloaded when you build
 
 The mascot artwork, and the logo and device bitmaps drawn from it, come from [Hermes Agent](https://github.com/NousResearch/hermes-agent) (MIT, © 2025 Nous Research); see [assets/mascot](assets/mascot) and [NOTICE](NOTICE).
 
+## Adapted face timing
+
+Blink spacing, the one-in-five double blink, glance spacing and the exponential glance ease in `firmware/core/src/face.cpp` are adapted from [zongzhu-bot](https://github.com/Liu-zhongxian/zongzhu-bot) (`xiaozhi-esp32/main/boards/common/zongzhu/eye_model.h` and `eye_display.h`, commit `b47140208d65ef46e53bf109d498dc6adf3116bd`, MIT, © 2025 Shenzhen Xinzhi Future Technology Co., Ltd. and © 2025 Project Contributors). The licence is [LICENSES/zongzhu-MIT.txt](LICENSES/zongzhu-MIT.txt). The disc, the eye geometry and the screen mapping are original; see [NOTICE](NOTICE).
+
 ## Vendored code
 
 The QR code encoder in `firmware/core/third_party/qrcode/` is vendored from [ricmoo/QRCode](https://github.com/ricmoo/QRCode) (MIT, © 2017 Richard Moore and © 2017 Project Nayuki), which in turn derives from [Project Nayuki's QR Code generator](https://www.nayuki.io/page/qr-code-generator-library). It is adapted for this project: the C99 variable-length arrays become fixed, bounded buffers so MSVC accepts the file, and two bounds checks are added so an oversized payload cannot corrupt memory or produce an unscannable code. The modification notice is in [NOTICE](NOTICE) and the upstream license in [LICENSES/QRCode-MIT.txt](LICENSES/QRCode-MIT.txt).

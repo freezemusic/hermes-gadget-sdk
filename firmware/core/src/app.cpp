@@ -19,7 +19,7 @@ constexpr uint32_t kMinUtteranceMs = 350;
 constexpr uint32_t kMaxUtteranceMs = 30000;
 constexpr uint32_t kThinkingTimeoutMs = 180000;
 constexpr uint32_t kSettleAfterReplyMs = 6000;
-constexpr uint32_t kReplyLingerMs = 20000;    // reply text stays up this long before the mascot returns
+constexpr uint32_t kReplyLingerMs = 20000;    // reply text stays up this long before the face returns
 constexpr uint32_t kNewSessionHoldMs = 2000;  // hold CANCEL this long to start a new session
 constexpr uint32_t kNewSessionHintMs = 600;   // ...and show the countdown after this long
 constexpr uint32_t kPromptArmMs = 600;        // presses this soon after a question appears don't answer it
@@ -28,6 +28,8 @@ constexpr uint32_t kManualScrollPauseMs = 15000;  // UP/DOWN pauses automatic pa
 constexpr uint8_t kCaptionLines = 3;          // detail lines on pairing, setup and card screens
 constexpr uint8_t kPromptLines = 4;           // ...and on a question (the renderer drops lines on small screens)
 constexpr uint32_t kFrameMs = 100;
+constexpr uint32_t kFaceFrameMs = 33;  // ~30 fps while a hero face is on screen
+constexpr uint32_t kHappyFrames = 60;  // ~2 s of the smile after a successful turn
 constexpr uint32_t kSensorIntervalMs = 2000;
 constexpr uint32_t kDefaultCardMs = 15000;
 constexpr int kDashboardVersion = 1;    // the dashboard message this firmware draws
@@ -472,6 +474,8 @@ void App::h_turn_start(const json::Value& m) {
     mode_since_ = now();
   }
   status_.clear();
+  happy_arm_ = false;
+  happy_until_ = 0;
 }
 
 void App::h_turn_end(const json::Value& m) {
@@ -482,6 +486,8 @@ void App::h_turn_end(const json::Value& m) {
   if (m["outcome"].as_string() == "failure" && reply_.empty()) {
     notice_ = "Hermes could not complete that request";
     notice_until_ = now() + 8000;
+  } else if (m["outcome"].as_string() == "success") {
+    happy_arm_ = true;
   }
   if (mode_ == Mode::Thinking) {
     mode_ = reply_.empty() ? Mode::Idle : Mode::Responding;
@@ -588,6 +594,10 @@ void App::on_transport_binary(const uint8_t* data, size_t len) {
     pcm_buf_.resize(n);
     std::memcpy(pcm_buf_.data(), f.payload, n * 2);  // payload may be unaligned
     hal_.speaker->write(pcm_buf_.data(), n);
+    if (n) {
+      voice_ = level_percent(rms(pcm_buf_.data(), n));
+      voice_at_ = now();
+    }
     return;
   }
   if (f.channel == proto::Channel::Image) {
@@ -924,6 +934,8 @@ void App::start_listening(bool hands_free) {
   send(start);
   mode_ = Mode::Listening;
   mode_since_ = now();
+  happy_arm_ = false;
+  happy_until_ = 0;
   reply_.clear();
   status_.clear();
   user_echo_.clear();
@@ -1440,15 +1452,32 @@ void App::tick() {
   flush_display_state();
   perf_tick();
 
+  bool stepped = false;
   if (t - frame_at_ >= kFrameMs) {
     frame_at_ = t;
     ++model_.frame;
-    update_model();
+    stepped = true;
   }
+  // The face runs faster than the other screens, and only while it is actually
+  // showing. A dark screen keeps the slower clock.
+  if (!display_sleeping_ && model_.hero && t - face_at_ >= kFaceFrameMs) {
+    face_at_ = t;
+    ++face_frame_;
+    if (voice_ && t - voice_at_ >= kFaceFrameMs) {
+      voice_ = voice_ > 12 ? static_cast<uint8_t>(voice_ - 12) : 0;
+      voice_at_ = t;
+    }
+    if (happy_until_ && face_frame_ >= happy_until_) happy_until_ = 0;
+    stepped = true;
+  }
+  if (stepped) update_model();
 }
 
 void App::update_model() {
   UiModel& m = model_;
+  m.face_frame = face_frame_;
+  m.voice = voice_;
+  m.face_happy = false;
   m.title = name_;
   m.code.clear();
   m.detail.clear();
@@ -1613,7 +1642,7 @@ void App::update_model() {
     m.screen = Screen::Card;
     m.headline = card_title_.empty() ? "Hermes" : card_title_;
     m.hint = profile_.cancel_label + " to close";
-    // A short card is a caption under the mascot; a long one gets the text layout and pages.
+    // A short card is a caption under the face; a long one gets the text layout and pages.
     m.hero = !ui_ || static_cast<int>(wrap_text(card_body_, ui_->layout().hero_cols).size()) <= kCaptionLines;
     if (m.hero) {
       m.caption_lines = kCaptionLines;
@@ -1639,7 +1668,7 @@ void App::update_model() {
     m.detail = status_;
     m.body = reply_;
     m.hint = profile_.touch_screen ? "Hold to reply" : talk + " to reply";
-    // Spoken audio can start before the text arrives: let the mascot talk meanwhile.
+    // Spoken audio can start before the text arrives: let the face talk meanwhile.
     m.hero = reply_.empty();
   } else {
     m.screen = Screen::Ready;
@@ -1662,6 +1691,13 @@ void App::update_model() {
       *power_status_->battery_percent <= 10 && power_status_->external_power == false)
     m.detail = "Low battery: connect USB";
   if (!hint_flash_.empty()) m.hint = hint_flash_;
+  // The smile starts on the first frame the idle face is actually up, including
+  // when a reply's text has just given the screen back.
+  if (m.hero && m.screen == Screen::Ready && happy_arm_) {
+    happy_until_ = face_frame_ + kHappyFrames;
+    happy_arm_ = false;
+  }
+  m.face_happy = m.hero && happy_until_ != 0 && face_frame_ < happy_until_;
   if (!display_sleeping_) render(m);
 }
 
