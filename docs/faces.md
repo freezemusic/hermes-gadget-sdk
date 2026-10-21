@@ -82,7 +82,7 @@ schedules are in `firmware/core/src/face.cpp` and `app.cpp`:
 | `kFaceSleepReady`, `kFaceSleepOffline` | Frames before the collapse to one dot |
 | `kReactionRest`, `kReactionHold` | Idle variety: rest, then one reaction. The hold matches the ~1.2 s onboarding cadence |
 | `kShapeStart` | Face frame before the body will leave the circle. Early frames stay a circle |
-| `kBandAbove`, `kBandBelow` | The old eye-band limits. A live face now flushes the whole silhouette instead, so a pose outside the eye band is still drawn |
+| `kBandAbove`, `kBandBelow` | Fallback eye-band limits. A settled face flushes the real eye box instead; these still describe a blink that has not moved |
 
 Poses are in `pose_left` and `pose_right`. `x`, `y`, `w` and `h` are thousandths of the disc
 diameter, origin at the centre, and `tilt` is degrees clockwise (screen y grows down).
@@ -96,13 +96,23 @@ drawing is original. See [NOTICE](../NOTICE).
 While a hero face is on screen and the display is awake, the app steps a face clock about
 every 33 ms (about 30 fps). Every other screen stays on the 100 ms frame. A live face
 (anything that blinks, glances, breathes, pulses, morphs or spins) is flushed on every one
-of those ticks. The dirty rows cover the whole silhouette — disc, rings, dots, the
-exclamation mark and the morph — plus the caption under it. Gating that flush on a picture
-key dropped blinks, the microphone, the dot pulse and the morph, because those either were
-not in the key or fell outside the eye band; the 33 ms tick then ran and pushed nothing.
-A finished sleep dot and the error mark stay still. Microphone level is copied onto the
-face on that same tick (`App::on_mic_samples` updates it as samples arrive). Speaker level
-is the RMS of each TTS block, and it decays between blocks.
+of those ticks. The dithered disc is rasterised once per shape and colour into a buffer
+(PSRAM on the ESP32) and blitted after that. A settled blink, glance, breath or level
+change restores only the union of the previous and current eye box from that buffer, then
+draws the eyes, and flushes those rows. The caption stays where it was. Morphing, a shape
+blend, the sleep collapse and the loading swirl still clear and redraw the whole
+silhouette. Gating the flush on a picture key dropped blinks, the microphone, the dot
+pulse and the morph, because those either were not in the key or fell outside a fixed
+band; the 33 ms tick then ran and pushed nothing. A finished sleep dot and the error mark
+stay still. Microphone level is copied onto the face on that same tick
+(`App::on_mic_samples` updates it as samples arrive). Speaker level is the RMS of each TTS
+block, and it decays between blocks.
+
+On the 2.06 the idle clock is 80 MHz unless something holds the CPU up, and the panel is
+QSPI at 40 MHz. A cached eye update is expected around 4–8 ms of drawing and 8–12 ms of
+flush, under the 33 ms tick. A morph frame still walks the disc, so it can take longer.
+Those figures are estimates from the pixel counts, not a measurement on a board. The host
+benchmark in the face tests times the same split on the computer and is not the device.
 
 The watch's QMI8658 is not read by this firmware, so the face does not parallax with tilt.
 

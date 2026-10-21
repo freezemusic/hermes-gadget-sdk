@@ -15,6 +15,9 @@
 #include <string_view>
 
 #include "freertos/FreeRTOS.h"  // must precede every other FreeRTOS header
+#include "freertos/task.h"
+
+#include "hg/cooperate.hpp"
 
 #include "board.hpp"
 #include "axp2101.hpp"
@@ -226,7 +229,7 @@ class SpiDisplay final : public hg::Display {
   esp_lcd_panel_io_handle_t io_ = nullptr;
   esp_lcd_panel_handle_t panel_ = nullptr;
   uint16_t* fb_ = nullptr;
-  uint16_t* bounce_ = nullptr;  // DMA-capable staging rows
+  uint16_t* bounce_[2] = {nullptr, nullptr};  // DMA-capable staging rows
   SemaphoreHandle_t done_ = nullptr;
   std::optional<hg::BandFlush> bands_;
 };
@@ -291,7 +294,7 @@ class ParallelDisplay final : public hg::Display {
   esp_lcd_panel_io_handle_t io_ = nullptr;
   esp_lcd_panel_handle_t panel_ = nullptr;
   uint16_t* fb_ = nullptr;
-  uint16_t* bounce_ = nullptr;  // DMA-capable staging rows
+  uint16_t* bounce_[2] = {nullptr, nullptr};  // DMA-capable staging rows
   int bounce_rows_ = 0;
   uint8_t backlight_level_ = 0;
   SemaphoreHandle_t done_ = nullptr;
@@ -315,7 +318,7 @@ class AmoledDisplay final : public hg::Display {
   AmoledConfig cfg_{};
   esp_lcd_panel_io_handle_t io_ = nullptr;
   uint16_t* fb_ = nullptr;
-  uint16_t* bounce_ = nullptr;
+  uint16_t* bounce_[2] = {nullptr, nullptr};
   SemaphoreHandle_t done_ = nullptr;
   std::optional<hg::BandFlush> bands_;
   bool panel_on_ = true;
@@ -335,6 +338,22 @@ inline bool gpio_isr_service() {
 inline bool esp_ok(esp_err_t err, const char* tag, const char* what) {
   if (err == ESP_OK) return true;
   ESP_LOGE(tag, "%s failed: %s", what, esp_err_to_name(err));
+  return false;
+}
+
+// Waits for one DMA completion, sampling buttons between ticks so a long flush
+// does not hold the debounce counters still. timeout 0 is a poll.
+inline bool wait_dma(SemaphoreHandle_t done, uint32_t timeout_ms) {
+  if (timeout_ms == 0) return xSemaphoreTake(done, 0) == pdTRUE;
+  TickType_t left = pdMS_TO_TICKS(timeout_ms);
+  if (left < 1) left = 1;
+  while (left > 0) {
+    hg::cooperate();
+    const TickType_t slice = left > 1 ? 1 : left;
+    if (xSemaphoreTake(done, slice) == pdTRUE) return true;
+    if (slice >= left) break;
+    left -= slice;
+  }
   return false;
 }
 
@@ -538,6 +557,8 @@ class Buttons {
  public:
   void begin(const ButtonConfig& cfg);
   void poll(hg::App& app);  // call every ~10 ms from the app task
+  // Advance debounce without calling into the app. Safe from a long paint.
+  void sample();
 
  private:
   struct Button {
@@ -546,7 +567,14 @@ class Buttons {
     bool pressed = false;
     uint8_t stable = 0;
   };
+  struct Edge {
+    hg::Button id = hg::Button::Talk;
+    bool down = false;
+  };
   Button buttons_[4];
+  Edge pending_[8];
+  uint8_t pending_n_ = 0;
+  TickType_t sampled_at_ = 0xFFFFFFFFu;
 };
 
 // Over-the-air updates into the other app slot of partitions.csv. A new image

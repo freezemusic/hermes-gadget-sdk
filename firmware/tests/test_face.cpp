@@ -1,8 +1,11 @@
 // The procedural face: blink and glance schedules, and that the disc and the
 // eyes actually land in the framebuffer.
+#include <chrono>
+#include <cstdio>
 #include <vector>
 
 #include "check.hpp"
+#include "hg/cooperate.hpp"
 #include "hg/face.hpp"
 #include "hg/ui.hpp"
 
@@ -267,4 +270,125 @@ TEST("face: thinking morphs the body into three dots, and an error is only a mar
   swirl.swirl = true;
   CHECK(hg::face::anim_wide(swirl));
   CHECK(!hg::face::anim_wide({}));
+}
+
+TEST("face: a settled blink matches a full redraw and leaves the body cached") {
+  struct Panel : hg::Display {
+    std::vector<uint16_t> fb = std::vector<uint16_t>(200 * 200, 0);
+    hg::DisplayInfo info() const override {
+      hg::DisplayInfo d;
+      d.width = d.height = 200;
+      return d;
+    }
+    uint16_t* framebuffer() override { return fb.data(); }
+    void flush(uint16_t, uint16_t) override {}
+  } panel;
+  hg::Canvas canvas(panel.framebuffer(), 200, 200, false);
+  hg::face::discard_body_cache();
+  auto paint = [&](uint32_t frame) {
+    std::fill(panel.fb.begin(), panel.fb.end(), 0);
+    hg::face::draw(canvas, 100, 100, 160, hg::Screen::Ready, false, frame, 0, 0);
+  };
+  paint(0);
+  CHECK(hg::face::body_cached(100, 100, 160, hg::Screen::Ready, 0, {}, 200, false));
+  const std::vector<uint16_t> open = panel.fb;
+  const hg::face::Box prev = hg::face::last_overlay();
+  paint(8);
+  const std::vector<uint16_t> full = panel.fb;
+  panel.fb = open;
+  hg::face::Box dirty = hg::face::unite(prev, hg::face::overlay_box(100, 100, 160, hg::Screen::Ready, false, 8, 0, 0, {}));
+  CHECK(dirty.any);
+  dirty.x0 -= 1;
+  dirty.y0 -= 1;
+  dirty.x1 += 1;
+  dirty.y1 += 1;
+  hg::face::blit_body(canvas, dirty, 0);
+  hg::face::draw_overlay(canvas, 100, 100, 160, hg::Screen::Ready, false, 8, 0, 0);
+  CHECK(panel.fb == full);
+  // The disc outside that box is the cached body, not a fresh dither.
+  int same = 0;
+  for (int y = dirty.y1 + 2; y < 180; ++y) {
+    const size_t i = static_cast<size_t>(y * 200 + 100);
+    if (panel.fb[i] != 0 && panel.fb[i] == open[i]) ++same;
+  }
+  CHECK(same > 10);
+
+  static int yields = 0;
+  yields = 0;
+  hg::set_cooperate([] { ++yields; });
+  hg::face::discard_body_cache();
+  paint(0);
+  const int cold = yields;
+  yields = 0;
+  paint(1);  // cache hit: blit, no per-pixel disc
+  const int warm = yields;
+  hg::set_cooperate(nullptr);
+  CHECK(cold > 8);
+  CHECK(warm < cold / 4);
+}
+
+TEST("face: the cached body keeps the panel's byte order") {
+  struct Panel : hg::Display {
+    std::vector<uint16_t> fb = std::vector<uint16_t>(140 * 140, 0);
+    hg::DisplayInfo info() const override {
+      hg::DisplayInfo d;
+      d.width = d.height = 140;
+      d.swap_bytes = true;
+      return d;
+    }
+    uint16_t* framebuffer() override { return fb.data(); }
+    void flush(uint16_t, uint16_t) override {}
+  } panel;
+  hg::Canvas canvas(panel.framebuffer(), 140, 140, true);
+  hg::face::discard_body_cache();
+  std::fill(panel.fb.begin(), panel.fb.end(), 0);
+  hg::face::draw(canvas, 70, 70, 100, hg::Screen::Ready, false, 0, 0, 0);
+  const std::vector<uint16_t> first = panel.fb;
+  const uint16_t logical = canvas.get(70, 70);
+  const uint16_t raw = panel.fb[static_cast<size_t>(70 * 140 + 70)];
+  CHECK(raw == static_cast<uint16_t>((logical >> 8) | (logical << 8)));
+  std::fill(panel.fb.begin(), panel.fb.end(), 0);
+  hg::face::draw(canvas, 70, 70, 100, hg::Screen::Ready, false, 0, 0, 0);
+  CHECK(panel.fb == first);
+}
+
+TEST("face: cached eye updates are cheaper than redrawing the disc") {
+  struct Panel : hg::Display {
+    std::vector<uint16_t> fb = std::vector<uint16_t>(220 * 220, 0);
+    hg::DisplayInfo info() const override {
+      hg::DisplayInfo d;
+      d.width = d.height = 220;
+      return d;
+    }
+    uint16_t* framebuffer() override { return fb.data(); }
+    void flush(uint16_t, uint16_t) override {}
+  } panel;
+  hg::Canvas canvas(panel.framebuffer(), 220, 220, false);
+  hg::face::discard_body_cache();
+  std::fill(panel.fb.begin(), panel.fb.end(), 0);
+  hg::face::draw(canvas, 110, 110, 180, hg::Screen::Ready, false, 0, 0, 0);
+  auto t0 = std::chrono::steady_clock::now();
+  for (uint32_t f = 1; f <= 24; ++f) {
+    hg::face::Box dirty = hg::face::unite(
+        hg::face::last_overlay(), hg::face::overlay_box(110, 110, 180, hg::Screen::Ready, false, f, 0, 0, {}));
+    dirty.x0 -= 1;
+    dirty.y0 -= 1;
+    dirty.x1 += 1;
+    dirty.y1 += 1;
+    hg::face::blit_body(canvas, dirty, 0);
+    hg::face::draw_overlay(canvas, 110, 110, 180, hg::Screen::Ready, false, f, 0, 0);
+  }
+  const auto fast = std::chrono::steady_clock::now() - t0;
+  t0 = std::chrono::steady_clock::now();
+  for (uint32_t f = 1; f <= 24; ++f) {
+    hg::face::discard_body_cache();
+    std::fill(panel.fb.begin(), panel.fb.end(), 0);
+    hg::face::draw(canvas, 110, 110, 180, hg::Screen::Ready, false, f, 0, 0);
+  }
+  const auto slow = std::chrono::steady_clock::now() - t0;
+  const auto fast_us = std::chrono::duration_cast<std::chrono::microseconds>(fast).count();
+  const auto slow_us = std::chrono::duration_cast<std::chrono::microseconds>(slow).count();
+  std::printf("  face bench host: cached %ld us, full disc %ld us (24 frames)\n", static_cast<long>(fast_us),
+              static_cast<long>(slow_us));
+  CHECK(slow_us > fast_us * 3);
 }

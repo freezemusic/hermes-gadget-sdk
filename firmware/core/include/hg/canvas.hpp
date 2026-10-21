@@ -21,6 +21,13 @@ class Canvas {
 
   int width() const { return w_; }
   int height() const { return h_; }
+  int stride() const { return stride_; }
+  bool swapped() const { return swap_; }
+  // RGB565 already in framebuffer byte order.
+  uint16_t encoded(uint16_t color) const { return encode(color); }
+  // Row y of the framebuffer, or null when y is outside the canvas.
+  uint16_t* mutable_row(int y);
+  const uint16_t* encoded_row(int y) const;
 
   // Restricts drawing to rows [y0, y1); everything outside is left untouched.
   void set_clip_rows(int y0, int y1);
@@ -54,6 +61,9 @@ class Canvas {
 
   // Copies a w*h RGB565 block (native byte order) into the framebuffer.
   void blit(int x, int y, int w, int h, const uint16_t* src);
+  // Copies pixels that are already in framebuffer byte order. `src_stride` is
+  // the source row length in pixels.
+  void blit_encoded(int x, int y, int w, int h, const uint16_t* src, int src_stride);
 
  private:
   uint16_t encode(uint16_t c) const { return swap_ ? static_cast<uint16_t>((c >> 8) | (c << 8)) : c; }

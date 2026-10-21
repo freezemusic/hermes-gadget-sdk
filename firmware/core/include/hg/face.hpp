@@ -124,11 +124,45 @@ uint32_t picture_key(uint32_t frame, Mood mood, uint8_t level, uint8_t voice, bo
                      const Style& style = {});
 
 // Rows the face can touch, in canvas coordinates. wide covers the body and the
-// rings; morph >= 80 and not wide is the three-dot band.
+// rings; morph >= 80 and not wide is the three-dot band. A settled blink uses
+// the eye box from overlay_box instead of this band.
 void anim_rows(int cy, int diameter, int& y0, int& y1, bool wide = false, uint8_t morph = 0);
 
-// Body, eyes, and any overlay. The caller has already filled the background.
+// Axis-aligned box, x1/y1 exclusive. any is false when nothing was added.
+struct Box {
+  int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+  bool any = false;
+};
+
+Box unite(Box a, Box b);
+
+// True when the cached body matches this pose, so a settled frame can blit it.
+// backdrop is the logical RGB565 the hero area was cleared to.
+bool body_cached(int cx, int cy, int diameter, Screen screen, uint16_t backdrop, const Style& style, int canvas_w,
+                 bool swap);
+
+// Eyes, and the dot pulse once the body is gone. Empty when nothing moves on
+// top of the body.
+Box overlay_box(int cx, int cy, int diameter, Screen screen, bool happy, uint32_t frame, uint8_t level, uint8_t voice,
+                const Style& style);
+
+// The overlay box remembered by the last draw or draw_overlay.
+Box last_overlay();
+
+// Copies cached body pixels (already in framebuffer byte order) over `box`.
+// Gaps the cache does not cover are filled with backdrop.
+void blit_body(Canvas& c, const Box& box, uint16_t backdrop);
+
+// Eyes, rings in front, dots, or the error mark. Does not paint the body.
+void draw_overlay(Canvas& c, int cx, int cy, int diameter, Screen screen, bool happy, uint32_t frame, uint8_t level,
+                  uint8_t voice, const Style& style = {});
+
+// Drops the cached body. The next draw rasterises it again.
+void discard_body_cache();
+
+// Body, eyes, and any overlay. The caller has already filled the background
+// with `backdrop` (logical RGB565). A repeat of the same body blits the cache.
 void draw(Canvas& c, int cx, int cy, int diameter, Screen screen, bool happy, uint32_t frame, uint8_t level,
-          uint8_t voice, const Style& style = {});
+          uint8_t voice, const Style& style = {}, uint16_t backdrop = 0);
 
 }  // namespace hg::face

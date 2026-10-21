@@ -1,10 +1,21 @@
 #include "hg/canvas.hpp"
 
 #include <algorithm>
+#include <cstring>
 
 #include "hg/font.hpp"
 
 namespace hg {
+
+uint16_t* Canvas::mutable_row(int y) {
+  if (y < 0 || y >= h_) return nullptr;
+  return px_ + static_cast<size_t>(y) * stride_;
+}
+
+const uint16_t* Canvas::encoded_row(int y) const {
+  if (y < 0 || y >= h_) return nullptr;
+  return px_ + static_cast<size_t>(y) * stride_;
+}
 
 void Canvas::set_clip_rows(int y0, int y1) {
   clip_y0_ = std::max(0, y0);
@@ -221,6 +232,25 @@ void Canvas::blit(int x, int y, int w, int h, const uint16_t* src) {
       if (xx < 0 || xx >= w_) continue;
       px_[yy * stride_ + xx] = encode(src[row * w + col]);
     }
+  }
+}
+
+void Canvas::blit_encoded(int x, int y, int w, int h, const uint16_t* src, int src_stride) {
+  if (!src || w <= 0 || h <= 0) return;
+  if (src_stride < w) src_stride = w;
+  for (int row = 0; row < h; ++row) {
+    const int yy = y + row;
+    if (yy < clip_y0_ || yy >= clip_y1_ || yy >= h_ || yy < 0) continue;
+    int x0 = x;
+    int x1 = x + w;
+    const uint16_t* s = src + static_cast<size_t>(row) * src_stride;
+    if (x0 < 0) {
+      s += -x0;
+      x0 = 0;
+    }
+    if (x1 > w_) x1 = w_;
+    if (x0 >= x1) continue;
+    std::memcpy(px_ + static_cast<size_t>(yy) * stride_ + x0, s, static_cast<size_t>(x1 - x0) * sizeof(uint16_t));
   }
 }
 

@@ -130,6 +130,8 @@ The bench draws the same frames on every run, so compare its numbers between bui
 
 Simulator numbers measure the core on your computer, not the board's CPU or panel. Label each result as simulator or hardware, and name the board and build when you report it.
 
+A settled hero face does not redraw the dithered disc. The body is cached and only the eye box is blitted and flushed; the panel copies the next DMA band into a second bounce buffer while the previous band is on the bus. The face tests print a host timing for that split (`cached` versus `full disc`). It is not the ESP32 number. On the 2.06, idle Ready is expected around 4–8 ms render and 8–12 ms flush at the 80 MHz idle clock; a morph frame still rasterises the disc and can miss 33 ms. Those are estimates, not a flashed measurement.
+
 ### Build checks
 
 Two checks stop a firmware build that would run with settings nobody asked for. Both run in every PlatformIO build, locally and in CI:

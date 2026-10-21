@@ -290,6 +290,12 @@ extern "C" void app_main(void) {
     if (board.light_sleep && g_codec.mic_link().switchable) g_codec_speaker.allow_power_down(g_codec.mic_link().format);
   }
   g_buttons.begin(board.buttons);
+  // Long face paints and DMA waits call this so a held button still debounces
+  // and the touch task can run. It must not enter the app.
+  hg::set_cooperate([] {
+    g_buttons.sample();
+    taskYIELD();
+  });
   const bool touch = peripherals_ready && (board.touch.enabled || board.pwr_key.enabled || board.encoder.a >= 0) &&
                      g_touch.begin(board.touch, board.pwr_key, board.encoder,
                                    board.touch.bus.sda >= 0 ? hgp::i2c::touch_bus(board.touch.bus) : i2c_bus);

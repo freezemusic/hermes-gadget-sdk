@@ -294,21 +294,46 @@ void Ui::draw_frame(const UiModel& m) {
       hash_[i] = hashes[i];
     }
     uint32_t stat = Hash().val(m.screen).add(m.headline).add(m.detail).add(m.yes).add(m.no).val(m.caption_lines).get();
-    const int face_d = hero_geom(m).size;
+    const HeroGeom geom = hero_geom(m);
+    const int face_d = geom.size;
     uint32_t anim = hero_anim_key(m, face_d);
     int y0 = y_header, y1 = y_bottom;
-    // A caption or screen change clears the whole hero area. While the face
-    // itself is moving, every tick flushes the silhouette and the caption,
-    // not only the eye band: blinks, glances, mic level, the dot pulse and
-    // the morph all have to reach the panel. Gating those on a picture key
-    // left the watch on the last full paint (frames stayed at 0).
+    // A caption or screen change clears the whole hero area. A settled face
+    // (blink, glance, breath, microphone, speaker) blits the cached body over
+    // the union of the previous and current eye box and flushes only those
+    // rows. Morphing, a shape blend, the sleep collapse and the swirl still
+    // redraw the whole silhouette. Gating the flush on a picture key left the
+    // watch on the last full paint (frames stayed at 0).
     const bool full = !valid_ || !hero_valid_ || stat != hero_static_;
     const bool moved = anim != hero_anim_ || face_live(m);
+    const face::Style style = face_style(m);
+    const int cx = geom.x + geom.size / 2;
+    const int cy = geom.y + geom.size / 2;
+    const bool settled = !full && !face::anim_wide(style) &&
+                         face::body_cached(cx, cy, geom.size, m.screen, bg_, style, c.width(), c.swapped());
     if (full || moved) {
-      if (!full) hero_anim_rows(m, y0, y1);
-      c.set_clip_rows(y0, y1);
-      draw_hero(c, m);
-      flush(y0, y1);
+      if (settled) {
+        face::Box cur = face::overlay_box(cx, cy, geom.size, m.screen, m.face_happy, m.face_frame, m.level, m.voice, style);
+        face::Box dirty = face::unite(face::last_overlay(), cur);
+        if (dirty.any) {
+          dirty.x0 -= 2;
+          dirty.y0 -= 2;
+          dirty.x1 += 2;
+          dirty.y1 += 2;
+        }
+        y0 = std::max(dirty.y0, y_header);
+        y1 = std::min(dirty.y1, y_bottom);
+        if (y1 < y0) y1 = y0;
+        c.set_clip_rows(y0, y1);
+        face::blit_body(c, dirty, bg_);
+        face::draw_overlay(c, cx, cy, geom.size, m.screen, m.face_happy, m.face_frame, m.level, m.voice, style);
+        flush(y0, y1);
+      } else {
+        if (!full) hero_anim_rows(m, y0, y1);
+        c.set_clip_rows(y0, y1);
+        draw_hero(c, m);
+        flush(y0, y1);
+      }
     }
     hero_static_ = stat;
     hero_anim_ = anim;
@@ -781,7 +806,7 @@ void Ui::draw_hero(Canvas& c, const UiModel& m) {
 
   const HeroGeom g = hero_geom(m);
   face::draw(c, g.x + g.size / 2, g.y + g.size / 2, g.size, m.screen, m.face_happy, m.face_frame, m.level, m.voice,
-             face_style(m));
+             face_style(m), bg_);
 
   // Caption: headline, then the detail lines, centred.
   const int cols = layout_.hero_cols;

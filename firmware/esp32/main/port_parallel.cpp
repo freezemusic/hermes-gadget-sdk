@@ -95,8 +95,10 @@ bool ParallelDisplay::begin(const LcdConfig& cfg, int power_pin) {
   fb_ = static_cast<uint16_t*>(heap_caps_malloc(px * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   if (!fb_) fb_ = static_cast<uint16_t*>(heap_caps_malloc(px * 2, MALLOC_CAP_8BIT));
   bounce_rows_ = kBounceRows;
-  bounce_ = static_cast<uint16_t*>(heap_caps_malloc(static_cast<size_t>(cfg.width) * bounce_rows_ * 2, MALLOC_CAP_DMA));
-  if (!fb_ || !bounce_) {
+  const size_t bounce_bytes = static_cast<size_t>(cfg.width) * bounce_rows_ * 2;
+  bounce_[0] = static_cast<uint16_t*>(heap_caps_malloc(bounce_bytes, MALLOC_CAP_DMA));
+  bounce_[1] = static_cast<uint16_t*>(heap_caps_malloc(bounce_bytes, MALLOC_CAP_DMA));
+  if (!fb_ || !bounce_[0]) {
     ESP_LOGE(TAG, "not enough memory for a %ux%u framebuffer", cfg.width, cfg.height);
     return false;
   }
@@ -171,15 +173,19 @@ bool ParallelDisplay::begin(const LcdConfig& cfg, int power_pin) {
   }
   if (!esp_ok(esp_lcd_panel_disp_on_off(panel_, true), TAG, "esp_lcd_panel_disp_on_off")) return false;
 
-  // Each band's DMA transfer must finish before the bounce buffer is refilled.
+  // Two slots fill the idle buffer while the other band is on the bus.
+  const int slots = bounce_[1] ? 2 : 1;
   bands_.emplace(
-      cfg.height, bounce_rows_, 100,
-      [this](int y, int rows) {
+      cfg.height, bounce_rows_, 100, slots,
+      [this](int slot, int y, int rows) {
         const int w = cfg_.width;
-        std::memcpy(bounce_, fb_ + static_cast<size_t>(y) * w, static_cast<size_t>(rows) * w * 2);
-        return esp_lcd_panel_draw_bitmap(panel_, 0, y, w, y + rows, bounce_) == ESP_OK;
+        std::memcpy(bounce_[slot], fb_ + static_cast<size_t>(y) * w, static_cast<size_t>(rows) * w * 2);
       },
-      [this](uint32_t ms) { return xSemaphoreTake(done_, pdMS_TO_TICKS(ms)) == pdTRUE; });
+      [this](int slot, int y, int rows) {
+        const int w = cfg_.width;
+        return esp_lcd_panel_draw_bitmap(panel_, 0, y, w, y + rows, bounce_[slot]) == ESP_OK;
+      },
+      [this](uint32_t ms) { return wait_dma(done_, ms); });
   if (cfg.backlight >= 0) set_backlight(100);
   ESP_LOGI(TAG, "ST7789 %ux%u ready on the i80 bus (gap %d,%d)", cfg.width, cfg.height, cfg.gap_x, cfg.gap_y);
   return true;

@@ -82,6 +82,7 @@ struct FakeHal : hg::Display, hg::AudioIn, hg::AudioOut, hg::Transport, hg::Stor
   std::vector<uint16_t> fb = std::vector<uint16_t>(320 * 240, 0);
   int flushes = 0;
   int flushed_rows = 0;
+  int last_rows = 0;
   hg::DisplayInfo info() const override {
     hg::DisplayInfo d;
     d.width = static_cast<uint16_t>(width);
@@ -106,6 +107,7 @@ struct FakeHal : hg::Display, hg::AudioIn, hg::AudioOut, hg::Transport, hg::Stor
   }
   void flush(uint16_t y0, uint16_t y1) override {
     ++flushes;
+    last_rows = y1 - y0;
     flushed_rows += y1 - y0;
   }
 
@@ -961,10 +963,23 @@ TEST("app: hero animation redraws the face, not the whole screen") {
   flushes = r.fake.flushes - flushes;
   rows = r.fake.flushed_rows - rows;
   CHECK(flushes > 0);
-  // Every live tick flushes the silhouette and the caption. The bars stay.
+  // A settled blink flushes the eye box, not the silhouette or the caption.
   const int band = rows / flushes;
-  CHECK(band > 40);
-  CHECK(band < r.fake.height - 8);
+  CHECK(band >= 10);
+  CHECK(band < r.fake.height / 2);
+
+  r.app.on_button(hg::Button::Talk, true);
+  r.advance(400);
+  r.app.on_button(hg::Button::Talk, false);
+  r.server(R"({"type":"transcript","text":"hello"})");
+  int wide = 0;
+  for (int i = 0; i < 40; ++i) {
+    r.fake.clock += 10;
+    r.app.tick();
+    if (r.fake.last_rows > wide) wide = r.fake.last_rows;
+  }
+  CHECK(r.app.screen() == hg::Screen::Thinking);
+  CHECK(wide > band + 20);  // the morph still redraws the silhouette
 }
 
 bool blue_dominant_px(uint16_t p) {

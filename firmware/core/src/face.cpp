@@ -3,7 +3,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+
+#include "hg/cooperate.hpp"
 
 namespace hg::face {
 namespace {
@@ -585,10 +588,28 @@ int blended_sd(int dx, int dy, int r, const Style& style) {
   return circle + (target - circle) * static_cast<int>(style.shape_k) / 100;
 }
 
+// One-pixel edge. sd <= -1 is opaque, sd == 0 is half, sd >= 1 is empty.
+// Indexed by sd+1 so the edge itself is a lookup, not a float ramp.
+constexpr int kCoverageLut[3] = {256, 128, 0};
+
 int coverage(int sd) {
-  if (sd <= -1) return 256;
-  if (sd >= 1) return 0;
-  return 128;
+  if (sd <= -1) return kCoverageLut[0];
+  if (sd >= 1) return kCoverageLut[2];
+  return kCoverageLut[1];
+}
+
+// Same result as coverage(isqrt(d2) - r), without a square root.
+int coverage_d2(int d2, int r) {
+  const int r2 = r * r;
+  if (d2 < r2) return kCoverageLut[0];
+  if (d2 < (r + 1) * (r + 1)) return kCoverageLut[1];
+  return kCoverageLut[2];
+}
+
+// Largest dx with dx^2 <= lim, or -1 when lim < 0.
+int chord(int lim) {
+  if (lim < 0) return -1;
+  return isqrt_u32(static_cast<uint32_t>(lim));
 }
 
 void paint_body(Canvas& c, int cx, int cy, int r, Rgb hi, Rgb mid, Rgb lo, const Style& style) {
@@ -597,22 +618,26 @@ void paint_body(Canvas& c, int cx, int cy, int r, Rgb hi, Rgb mid, Rgb lo, const
   const int ext = r + 3;
   const int y0 = std::max(cy - ext, c.clip_y0());
   const int y1 = std::min(cy + ext + 1, c.clip_y1());
+  const int r2 = r * r;
+  const int edge2 = (r + 1) * (r + 1);
   g_dither.reset(c.width());
   for (int y = y0; y < y1; ++y) {
+    if (((y - y0) & 7) == 0) cooperate();
     const int dy = y - cy;
+    const int dy2 = dy * dy;
+    uint16_t* row = c.mutable_row(y);
     if (round) {
-      const int rest = r * r - dy * dy;
-      int half = 0;
-      if (rest > 0) half = isqrt_u32(static_cast<uint32_t>(rest));
-      const int x_lo = cx - half - 1;
-      const int x_hi = cx + half + 1;
-      for (int x = x_lo; x <= x_hi; ++x) {
-        const int dx = x - cx;
-        const int sd = isqrt_u32(static_cast<uint32_t>(dx * dx + dy * dy)) - r;
-        const int cov = coverage(sd);
-        if (cov <= 0) continue;
+      // Full pixels are d2 < r^2, the antialiased ring is r^2 <= d2 < (r+1)^2.
+      // One chord per row replaces a square root on every pixel.
+      const int edge = chord(edge2 - dy2 - 1);
+      const int full = chord(r2 - dy2 - 1);
+      for (int dx = -edge; dx <= edge; ++dx) {
+        const int x = cx + dx;
+        const int adx = dx < 0 ? -dx : dx;
+        const int cov = adx <= full ? 256 : 128;
         const uint16_t col = g_dither.apply(x, y, shade_rgb(dx, dy, r, hi, mid, lo));
-        if (cov >= 256) c.pixel(x, y, col);
+        if (!row || x < 0 || x >= c.width()) continue;
+        if (cov >= 256) row[x] = c.encoded(col);
         else c.blend(x, y, col, cov);
       }
     } else {
@@ -621,8 +646,10 @@ void paint_body(Canvas& c, int cx, int cy, int r, Rgb hi, Rgb mid, Rgb lo, const
         const int cov = coverage(sd);
         if (cov <= 0) continue;
         const uint16_t col = g_dither.apply(cx + dx, y, shade_rgb(dx, dy, r, hi, mid, lo));
-        if (cov >= 256) c.pixel(cx + dx, y, col);
-        else c.blend(cx + dx, y, col, cov);
+        const int x = cx + dx;
+        if (!row || x < 0 || x >= c.width()) continue;
+        if (cov >= 256) row[x] = c.encoded(col);
+        else c.blend(x, y, col, cov);
       }
     }
     g_dither.next_row();
@@ -633,13 +660,21 @@ void paint_aa_disc(Canvas& c, int cx, int cy, int r, uint16_t color) {
   if (r < 1) return;
   const int y0 = std::max(cy - r - 1, c.clip_y0());
   const int y1 = std::min(cy + r + 2, c.clip_y1());
+  const int r2 = r * r;
+  const int edge2 = (r + 1) * (r + 1);
+  const uint16_t solid = c.encoded(color);
   for (int y = y0; y < y1; ++y) {
     const int dy = y - cy;
-    for (int dx = -r - 1; dx <= r + 1; ++dx) {
-      const int sd = isqrt_u32(static_cast<uint32_t>(dx * dx + dy * dy)) - r;
-      const int cov = coverage(sd);
-      if (cov >= 256) c.pixel(cx + dx, y, color);
-      else if (cov > 0) c.blend(cx + dx, y, color, cov);
+    const int dy2 = dy * dy;
+    const int edge = chord(edge2 - dy2 - 1);
+    const int full = chord(r2 - dy2 - 1);
+    uint16_t* row = c.mutable_row(y);
+    for (int dx = -edge; dx <= edge; ++dx) {
+      const int x = cx + dx;
+      if (!row || x < 0 || x >= c.width()) continue;
+      const int adx = dx < 0 ? -dx : dx;
+      if (adx <= full) row[x] = solid;
+      else c.blend(x, y, color, 128);
     }
   }
 }
@@ -666,23 +701,22 @@ void paint_eye(Canvas& c, int cx, int cy, int hw, int hh, int tilt, int taper_to
       if (hw_y < 1) hw_y = 1;
       const int ax = iabs(lx);
       const int ay = iabs(ly);
-      int sd;
+      int cov;
       if (hh >= hw_y) {
         const int inner = hh - hw_y;
-        if (ay <= inner) sd = ax - hw_y;
+        if (ay <= inner) cov = coverage(ax - hw_y);
         else {
           const int ey = ay - inner;
-          sd = isqrt_u32(static_cast<uint32_t>(ax * ax + ey * ey)) - hw_y;
+          cov = coverage_d2(ax * ax + ey * ey, hw_y);
         }
       } else {
         const int inner = hw_y - hh;
-        if (ax <= inner) sd = ay - hh;
+        if (ax <= inner) cov = coverage(ay - hh);
         else {
           const int ex = ax - inner;
-          sd = isqrt_u32(static_cast<uint32_t>(ex * ex + ay * ay)) - hh;
+          cov = coverage_d2(ex * ex + ay * ay, hh);
         }
       }
-      int cov = coverage(sd);
       if (cov <= 0) continue;
       cov = cov * alpha / 100;
       if (cov >= 256) c.pixel(cx + dx, y, color);
@@ -704,6 +738,7 @@ void paint_ring(Canvas& c, int cx, int cy, int rx, int ry, int thick, int deg, u
   const int y0 = std::max(cy - ext, c.clip_y0());
   const int y1 = std::min(cy + ext + 1, c.clip_y1());
   for (int y = y0; y < y1; ++y) {
+    if (((y - y0) & 7) == 0) cooperate();
     const int dy = y - cy;
     for (int dx = -ext; dx <= ext; ++dx) {
       const int lx = (dx * co + dy * s) >> 8;
@@ -805,6 +840,196 @@ Rgb stops_lo(Screen screen) {
   if (screen == Screen::Error) return {kRedShadeR, kRedShadeG, kRedShadeB};
   if (screen == Screen::Offline) return {kDimShadeR, kDimShadeG, kDimShadeB};
   return {kBlueShadeR, kBlueShadeG, kBlueShadeB};
+}
+
+int body_radius(int diameter, const Style& style) {
+  const int r = std::max(2, diameter / 2);
+  const int wake = std::min(100, static_cast<int>(style.wake));
+  const int morph = std::min(100, static_cast<int>(style.morph));
+  return r * wake / 100 * (100 - morph) / 100;
+}
+
+struct BodyKey {
+  int cx = 0, cy = 0, r = 0, width = 0;
+  uint8_t shape = 0, shape_k = 0;
+  uint8_t hr = 0, hg = 0, hb = 0, mr = 0, mg = 0, mb = 0, lr = 0, lg = 0, lb = 0;
+  uint16_t bg = 0;
+  bool swap = false;
+  bool operator==(const BodyKey& o) const {
+    return cx == o.cx && cy == o.cy && r == o.r && width == o.width && shape == o.shape && shape_k == o.shape_k &&
+           hr == o.hr && hg == o.hg && hb == o.hb && mr == o.mr && mg == o.mg && mb == o.mb && lr == o.lr &&
+           lg == o.lg && lb == o.lb && bg == o.bg && swap == o.swap;
+  }
+};
+
+BodyKey make_key(int cx, int cy, int diameter, Screen screen, uint16_t backdrop, const Style& style, int canvas_w,
+                 bool swap) {
+  BodyKey k;
+  k.cx = cx;
+  k.cy = cy;
+  k.r = body_radius(diameter, style);
+  k.width = canvas_w;
+  k.shape = style.shape;
+  k.shape_k = style.shape_k;
+  const Rgb hi = stops_hi(screen);
+  const Rgb mid = stops_mid(screen);
+  const Rgb lo = stops_lo(screen);
+  k.hr = hi.r;
+  k.hg = hi.g;
+  k.hb = hi.b;
+  k.mr = mid.r;
+  k.mg = mid.g;
+  k.mb = mid.b;
+  k.lr = lo.r;
+  k.lg = lo.g;
+  k.lb = lo.b;
+  k.bg = backdrop;
+  k.swap = swap;
+  return k;
+}
+
+// Post-dither body, including the antialiased edge, in framebuffer byte order.
+// One face is on screen and the core is single-threaded, so this is global.
+// A large malloc lands in PSRAM on the ESP32 (SPIRAM_USE_MALLOC).
+struct BodyCache {
+  BodyKey key{};
+  bool valid = false;
+  bool empty = false;
+  int x0 = 0, y0 = 0, w = 0, h = 0;
+  uint16_t* px = nullptr;
+  size_t cap = 0;
+  Box overlay{};
+};
+
+BodyCache g_cache;
+
+void add_box(Box& b, int x0, int y0, int x1, int y1) {
+  if (!b.any) {
+    b.x0 = x0;
+    b.y0 = y0;
+    b.x1 = x1;
+    b.y1 = y1;
+    b.any = x0 < x1 && y0 < y1;
+    return;
+  }
+  if (x0 < b.x0) b.x0 = x0;
+  if (y0 < b.y0) b.y0 = y0;
+  if (x1 > b.x1) b.x1 = x1;
+  if (y1 > b.y1) b.y1 = y1;
+}
+
+void store_body(Canvas& c, const BodyKey& key) {
+  g_cache.key = key;
+  g_cache.valid = false;
+  g_cache.empty = false;
+  if (key.r < 2) {
+    g_cache.empty = true;
+    g_cache.w = g_cache.h = 0;
+    g_cache.valid = true;
+    return;
+  }
+  const int ext = key.r + 3;
+  int x0 = key.cx - ext;
+  int y0 = key.cy - ext;
+  int x1 = key.cx + ext + 1;
+  int y1 = key.cy + ext + 1;
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 > c.width()) x1 = c.width();
+  if (y1 > c.height()) y1 = c.height();
+  // Ink sits on the disc plus a one-pixel ring. Empty rows outside that can be
+  // clipped off without changing the dither. A clip through the ink cannot.
+  const int ink0 = std::max(0, key.cy - key.r - 1);
+  const int ink1 = std::min(c.height(), key.cy + key.r + 2);
+  if (ink0 < c.clip_y0() || ink1 > c.clip_y1() || x1 <= x0 || y1 <= y0) return;
+  if (y0 < c.clip_y0()) y0 = c.clip_y0();
+  if (y1 > c.clip_y1()) y1 = c.clip_y1();
+  const int w = x1 - x0;
+  const int h = y1 - y0;
+  const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h);
+  if (n > g_cache.cap) {
+    std::free(g_cache.px);
+    g_cache.px = static_cast<uint16_t*>(std::malloc(n * sizeof(uint16_t)));
+    g_cache.cap = g_cache.px ? n : 0;
+  }
+  if (!g_cache.px) return;
+  for (int row = 0; row < h; ++row) {
+    const uint16_t* src = c.encoded_row(y0 + row);
+    if (!src) return;
+    std::memcpy(g_cache.px + static_cast<size_t>(row) * w, src + x0, static_cast<size_t>(w) * sizeof(uint16_t));
+  }
+  g_cache.x0 = x0;
+  g_cache.y0 = y0;
+  g_cache.w = w;
+  g_cache.h = h;
+  g_cache.empty = false;
+  g_cache.valid = true;
+}
+
+void blit_cached(Canvas& c, const Box& box, uint16_t backdrop) {
+  if (!box.any) return;
+  if (!g_cache.valid || g_cache.empty || !g_cache.px) {
+    c.fill_rect(box.x0, box.y0, box.x1 - box.x0, box.y1 - box.y0, backdrop);
+    return;
+  }
+  const int sx1 = g_cache.x0 + g_cache.w;
+  const int sy1 = g_cache.y0 + g_cache.h;
+  for (int y = box.y0; y < box.y1; ++y) {
+    if (y < g_cache.y0 || y >= sy1) {
+      c.fill_rect(box.x0, y, box.x1 - box.x0, 1, backdrop);
+      continue;
+    }
+    const int ix0 = std::max(box.x0, g_cache.x0);
+    const int ix1 = std::min(box.x1, sx1);
+    if (ix0 > box.x0) c.fill_rect(box.x0, y, ix0 - box.x0, 1, backdrop);
+    if (ix1 < box.x1) c.fill_rect(ix1, y, box.x1 - ix1, 1, backdrop);
+    if (ix0 < ix1) {
+      const uint16_t* src = g_cache.px + static_cast<size_t>(y - g_cache.y0) * g_cache.w + (ix0 - g_cache.x0);
+      c.blit_encoded(ix0, y, ix1 - ix0, 1, src, ix1 - ix0);
+    }
+  }
+}
+
+Sample placed(uint32_t frame, Mood mood, uint8_t level, uint8_t voice, const Style& style) {
+  Sample s = sample(frame, mood, level, voice, false);
+  // Blink and the thinking lift match the pixels draw_overlay paints.
+  if (style.swirl) s.blink = 0;
+  const int morph = std::min(100, static_cast<int>(style.morph));
+  if (mood == Mood::Thinking && morph > 0 && morph < 40) {
+    const int lift = (40 - morph) * 2;
+    s.left.y = static_cast<int16_t>(s.left.y - lift);
+    s.right.y = static_cast<int16_t>(s.right.y - lift);
+  }
+  return s;
+}
+
+void add_eye_box(Box& b, int cx, int cy, int diameter, const Eye& e, int blink) {
+  if (e.w <= 0 || e.h <= 0) return;
+  const int ex = cx + e.x * diameter / 1000;
+  const int ey = cy + e.y * diameter / 1000;
+  const int hw = std::max(1, e.w * diameter / 2000);
+  const int hh = std::max(1, drawn_h(e.h, blink) * diameter / 2000);
+  const int ext = hw + hh + 2;
+  add_box(b, ex - ext, ey - ext, ex + ext + 1, ey + ext + 1);
+}
+
+void paint_eyes(Canvas& c, int cx, int cy, int diameter, const Style& style, const Palette& pal, const Sample& s,
+                Mood mood) {
+  const int morph = std::min(100, static_cast<int>(style.morph));
+  const int wake = std::min(100, static_cast<int>(style.wake));
+  const int alpha = (100 - morph) * wake / 100;
+  auto eye = [&](const Eye& e, bool right) {
+    if (e.w <= 0 || e.h <= 0) return;
+    int top = 1000, bot = 1000;
+    taper_for(mood, right, top, bot);
+    const int ex = cx + e.x * diameter / 1000;
+    const int ey = cy + e.y * diameter / 1000;
+    const int hw = std::max(1, e.w * diameter / 2000);
+    const int hh = std::max(1, drawn_h(e.h, s.blink) * diameter / 2000);
+    paint_eye(c, ex, ey, hw, hh, e.tilt, top, bot, pal.eye, alpha);
+  };
+  eye(s.left, false);
+  eye(s.right, true);
 }
 
 }  // namespace
@@ -935,52 +1160,115 @@ void anim_rows(int cy, int diameter, int& y0, int& y1, bool wide, uint8_t morph)
   y1 = cy + diameter * kBandBelow / 1000 + 3;
 }
 
+Box unite(Box a, Box b) {
+  if (!a.any) return b;
+  if (!b.any) return a;
+  add_box(a, b.x0, b.y0, b.x1, b.y1);
+  return a;
+}
+
+bool body_cached(int cx, int cy, int diameter, Screen screen, uint16_t backdrop, const Style& style, int canvas_w,
+                 bool swap) {
+  if (!g_cache.valid) return false;
+  return g_cache.key == make_key(cx, cy, diameter, screen, backdrop, style, canvas_w, swap);
+}
+
+Box overlay_box(int cx, int cy, int diameter, Screen screen, bool happy, uint32_t frame, uint8_t level, uint8_t voice,
+                const Style& style) {
+  Box b;
+  if (diameter < 4) return b;
+  const Mood mood = mood_for(screen, happy, style.reaction, style.busy);
+  if (mood == Mood::Alert) {
+    const int ext = std::max(8, diameter * 28 / 100);
+    add_box(b, cx - ext, cy - ext, cx + ext + 1, cy + ext + 1);
+    return b;
+  }
+  if (style.swirl) {
+    const int ext = diameter * 74 / 100 + 2;
+    add_box(b, cx - ext, cy - ext, cx + ext + 1, cy + ext + 1);
+  }
+  if (eyes_visible(mood, style)) {
+    const Sample s = placed(frame, mood, level, voice, style);
+    add_eye_box(b, cx, cy, diameter, s.left, s.blink);
+    add_eye_box(b, cx, cy, diameter, s.right, s.blink);
+  }
+  const int morph = std::min(100, static_cast<int>(style.morph));
+  if (morph > 0) {
+    const int full = std::max(2, diameter * 9 / 100);
+    const int gap = std::max(full * 2 + 2, diameter * 22 / 100);
+    const int rad = full + full / 8 + 2;
+    for (int i = 0; i < 3; ++i) {
+      const int x = cx + (i - 1) * gap;
+      add_box(b, x - rad, cy - rad, x + rad + 1, cy + rad + 1);
+    }
+  }
+  return b;
+}
+
+Box last_overlay() { return g_cache.overlay; }
+
+void blit_body(Canvas& c, const Box& box, uint16_t backdrop) { blit_cached(c, box, backdrop); }
+
+void draw_overlay(Canvas& c, int cx, int cy, int diameter, Screen screen, bool happy, uint32_t frame, uint8_t level,
+                  uint8_t voice, const Style& style) {
+  if (diameter < 4) return;
+  const Palette pal = palette_for(screen);
+  const Mood mood = mood_for(screen, happy, style.reaction, style.busy);
+  const int r = std::max(2, diameter / 2);
+  const int morph = std::min(100, static_cast<int>(style.morph));
+  if (mood == Mood::Alert) {
+    paint_bang(c, cx, cy, diameter, pal.body);
+  } else {
+    if (eyes_visible(mood, style)) {
+      const Sample s = placed(frame, mood, level, voice, style);
+      paint_eyes(c, cx, cy, diameter, style, pal, s, mood);
+    }
+    if (style.swirl) paint_swirl(c, cx, cy, r, frame, true);
+    if (morph > 0) {
+      paint_dots(c, cx, cy, diameter, frame, static_cast<uint8_t>(morph), pal.body, pal.highlight, pal.shade);
+    }
+  }
+  g_cache.overlay = overlay_box(cx, cy, diameter, screen, happy, frame, level, voice, style);
+}
+
+void discard_body_cache() { g_cache.valid = false; }
+
 void draw(Canvas& c, int cx, int cy, int diameter, Screen screen, bool happy, uint32_t frame, uint8_t level,
-          uint8_t voice, const Style& style) {
+          uint8_t voice, const Style& style, uint16_t backdrop) {
   if (diameter < 4) return;
   const Palette pal = palette_for(screen);
   const int r = std::max(2, diameter / 2);
   const Mood mood = mood_for(screen, happy, style.reaction, style.busy);
   if (mood == Mood::Alert) {
-    paint_bang(c, cx, cy, diameter, pal.body);
+    draw_overlay(c, cx, cy, diameter, screen, happy, frame, level, voice, style);
     return;
   }
   if (style.swirl) paint_swirl(c, cx, cy, r, frame, false);
 
-  const int wake = std::min(100, static_cast<int>(style.wake));
   const int morph = std::min(100, static_cast<int>(style.morph));
-  int body_r = r * wake / 100 * (100 - morph) / 100;
-  if (body_r >= 2) {
-    paint_body(c, cx, cy, body_r, stops_hi(screen), stops_mid(screen), stops_lo(screen), style);
+  const BodyKey key = make_key(cx, cy, diameter, screen, backdrop, style, c.width(), c.swapped());
+  const bool hit = g_cache.valid && g_cache.key == key;
+  if (key.r >= 2) {
+    if (hit && !g_cache.empty) {
+      Box all;
+      all.x0 = g_cache.x0;
+      all.y0 = g_cache.y0;
+      all.x1 = g_cache.x0 + g_cache.w;
+      all.y1 = g_cache.y0 + g_cache.h;
+      all.any = true;
+      blit_cached(c, all, backdrop);
+    } else {
+      paint_body(c, cx, cy, key.r, stops_hi(screen), stops_mid(screen), stops_lo(screen), style);
+      store_body(c, key);
+    }
   } else if (morph < 40) {
     paint_aa_disc(c, cx, cy, std::max(2, diameter * 6 / 100), pal.body);
+    g_cache.valid = false;
+  } else if (!hit) {
+    store_body(c, key);
   }
 
-  if (eyes_visible(mood, style)) {
-    Sample s = sample(frame, mood, level, voice, dots_for(screen, style.busy));
-    if (style.swirl) s.blink = 0;
-    if (mood == Mood::Thinking && morph > 0 && morph < 40) {
-      const int lift = (40 - morph) * 2;
-      s.left.y = static_cast<int16_t>(s.left.y - lift);
-      s.right.y = static_cast<int16_t>(s.right.y - lift);
-    }
-    const int alpha = (100 - morph) * std::min(wake, 100) / 100;
-    auto eye = [&](const Eye& e, bool right) {
-      if (e.w <= 0 || e.h <= 0) return;
-      int top = 1000, bot = 1000;
-      taper_for(mood, right, top, bot);
-      const int ex = cx + e.x * diameter / 1000;
-      const int ey = cy + e.y * diameter / 1000;
-      const int hw = std::max(1, e.w * diameter / 2000);
-      const int hh = std::max(1, drawn_h(e.h, s.blink) * diameter / 2000);
-      paint_eye(c, ex, ey, hw, hh, e.tilt, top, bot, pal.eye, alpha);
-    };
-    eye(s.left, false);
-    eye(s.right, true);
-  }
-
-  if (style.swirl) paint_swirl(c, cx, cy, r, frame, true);
-  if (morph > 0) paint_dots(c, cx, cy, diameter, frame, static_cast<uint8_t>(morph), pal.body, pal.highlight, pal.shade);
+  draw_overlay(c, cx, cy, diameter, screen, happy, frame, level, voice, style);
 }
 
 }  // namespace hg::face
