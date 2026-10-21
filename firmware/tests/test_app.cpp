@@ -31,6 +31,8 @@ struct FakeHal : hg::Display, hg::AudioIn, hg::AudioOut, hg::Transport, hg::Stor
   }
   std::vector<std::string> logs;
   void log(hg::LogLevel, std::string_view message) override { logs.emplace_back(message); }
+  int restarts = 0;
+  void restart() override { ++restarts; }
 
   // Transport
   std::string url;
@@ -538,6 +540,77 @@ TEST("app: lost connections retry with backoff") {
   CHECK_EQ(r.fake.connects, before);
   r.advance(1000);
   CHECK_EQ(r.fake.connects, before + 1);
+}
+
+namespace {
+
+// The in-flight connect never opens. Stops on the timeout, before the next try.
+void timeout_current(Rig& r) {
+  const int closes = r.fake.closes;
+  const int connects = r.fake.connects;
+  for (int k = 0; k < 200 && r.fake.closes == closes; ++k) r.advance(100);
+  CHECK(r.fake.closes > closes);
+  CHECK_EQ(r.fake.connects, connects);
+}
+
+void wait_connect(Rig& r) {
+  const int before = r.fake.connects;
+  for (int k = 0; k < 800 && r.fake.connects == before; ++k) r.advance(100);
+  CHECK_EQ(r.fake.connects, before + 1);
+}
+
+}  // namespace
+
+TEST("app: a server drop retries the socket without rejoining Wi-Fi") {
+  Rig r;
+  int rejoins = 0;
+  r.app.on_rejoin_wifi = [&] { ++rejoins; return true; };
+  r.bring_online(true);
+  r.app.on_transport_closed("server restarted");
+  r.advance(2000);
+  CHECK_EQ(rejoins, 0);
+  CHECK_EQ(r.fake.restarts, 0);
+  CHECK(r.fake.connects > 1);
+}
+
+TEST("app: connect timeouts rejoin Wi-Fi, then restart") {
+  Rig r;
+  int rejoins = 0;
+  r.app.on_rejoin_wifi = [&] { ++rejoins; return true; };
+  r.app.begin();
+  r.app.on_network(true, "lan");
+  wait_connect(r);
+  timeout_current(r);
+  wait_connect(r);
+  timeout_current(r);
+  CHECK_EQ(rejoins, 0);
+  CHECK_EQ(r.fake.restarts, 0);
+  wait_connect(r);
+  timeout_current(r);  // third: drop the station
+  CHECK_EQ(rejoins, 1);
+  CHECK_EQ(r.fake.restarts, 0);
+  for (int i = 0; i < 3; ++i) {
+    wait_connect(r);
+    timeout_current(r);
+  }
+  CHECK_EQ(rejoins, 1);
+  CHECK_EQ(r.fake.restarts, 1);
+  CHECK(r.app.console("diag").find("connect timeout") != std::string::npos);
+}
+
+TEST("app: reconnect rejoins Wi-Fi before it opens another socket") {
+  Rig r;
+  int rejoins = 0;
+  r.app.on_rejoin_wifi = [&] { ++rejoins; return true; };
+  r.bring_online(true);
+  const int connects = r.fake.connects;
+  CHECK_EQ(r.app.console("reconnect"), std::string("@ok reconnect"));
+  CHECK_EQ(rejoins, 1);
+  CHECK_EQ(r.fake.connects, connects);
+  r.advance(4000);
+  CHECK_EQ(r.fake.connects, connects);
+  r.advance(2000);
+  CHECK(r.fake.connects > connects);
 }
 
 TEST("app: a silent server is detected by the heartbeat timeout") {

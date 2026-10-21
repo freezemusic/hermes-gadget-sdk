@@ -80,6 +80,36 @@ class TxWatch {
   std::atomic<uint32_t> since_{0};
 };
 
+// One WebSocket client at a time. connect() calls want(); the previous client
+// is push()ed to the send task and must be destroyed before the next one is
+// created, so a stuck handshake can't keep its TLS context and its DNS answer
+// alive under the new attempt. ready() is the "nothing left to destroy" check
+// on the app task. destroyed() is what the send task reports; it is true once,
+// when that destroy was the last and an open is still wanted.
+class ClientSlot {
+ public:
+  void want() { pending_.store(true); }
+  void cancel() { pending_.store(false); }
+  void push() { retiring_.fetch_add(1); }
+  // The close never reached the send task. The slot must not wait for it.
+  void unpush() {
+    int prev = retiring_.load();
+    while (prev > 0 && !retiring_.compare_exchange_weak(prev, prev - 1)) {
+    }
+  }
+  bool ready() const { return pending_.load() && retiring_.load() == 0; }
+  bool destroyed() {
+    int prev = retiring_.load();
+    while (prev > 0 && !retiring_.compare_exchange_weak(prev, prev - 1)) {
+    }
+    return prev > 0 && prev == 1 && pending_.load();
+  }
+
+ private:
+  std::atomic<int> retiring_{0};
+  std::atomic<bool> pending_{false};
+};
+
 struct TxItem {
   void* client;
   uint32_t generation;

@@ -2,6 +2,7 @@
 // core (hg::App) and runs the app loop on the main task.
 #include "port.hpp"  // first: pulls in FreeRTOS.h ahead of task.h/queue.h
 
+#include <cstdio>
 #include <cstring>
 
 #include "driver/gpio.h"
@@ -142,9 +143,15 @@ void dispatch(hg::App& app, hgp::Event& ev) {
     case EventType::NetDown:
       app.on_network(false, text ? text : "");
       break;
-    case EventType::WifiDisconnected:
-      g_wifi.disconnected();
+    case EventType::WifiDisconnected: {
+      int reason = 0;
+      if (text) std::sscanf(text, "Wi-Fi lost (reason %d)", &reason);
+      g_wifi.disconnected(reason);
       app.on_network(false, text ? text : "");
+      break;
+    }
+    case EventType::WifiBeaconTimeout:
+      g_wifi.on_beacon_timeout();
       break;
     case EventType::WifiStarted: g_wifi.reconfigure(); break;
     case EventType::WifiScanDone: g_wifi.scan_done(); break;
@@ -155,6 +162,10 @@ void dispatch(hg::App& app, hgp::Event& ev) {
     case EventType::WsText: app.on_transport_text(std::string_view(text, ev.len)); break;
     case EventType::WsBinary: app.on_transport_binary(ev.data, ev.len); break;
     case EventType::WsClosed: app.on_transport_closed(text ? text : "closed"); break;
+    case EventType::WsArm:
+      g_transport.arm();
+      app.on_transport_armed();
+      break;
     case EventType::Mic:
       app.on_mic_samples(reinterpret_cast<const int16_t*>(ev.data), ev.len / sizeof(int16_t));
       break;
@@ -341,6 +352,7 @@ extern "C" void app_main(void) {
     app.on_phone_pair_close = [] { g_phone.close_pairing(); };
     app.on_phone_forget = [] { g_phone.forget(); };
   }
+  app.on_rejoin_wifi = [] { return g_wifi.rejoin_station(); };
   app.on_wifi_setup = [] { return g_wifi.start_setup(); };
   app.on_wifi_setup_close = [] { g_wifi.stop_setup(); };
   app.on_wifi_setup_ap = [] { return g_wifi.setup_ap(); };

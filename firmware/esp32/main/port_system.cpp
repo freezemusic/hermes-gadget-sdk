@@ -5,7 +5,10 @@
 
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_system.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 namespace hgp {
 
@@ -17,6 +20,12 @@ void EspSystem::random_bytes(uint8_t* out, size_t len) {
   // Hardware RNG; entropy is good once the radio is up, and the device key is
   // generated after Wi-Fi starts (see main.cpp).
   esp_fill_random(out, len);
+}
+
+void EspSystem::restart() {
+  ESP_LOGE("hg", "restarting");
+  vTaskDelay(pdMS_TO_TICKS(100));  // let the log line out
+  esp_restart();
 }
 
 void EspSystem::log(hg::LogLevel level, std::string_view message) {

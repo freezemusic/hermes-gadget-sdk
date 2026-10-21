@@ -18,6 +18,7 @@
 #include "hg/frame_stats.hpp"
 #include "hg/hal.hpp"
 #include "hg/json.hpp"
+#include "hg/link_recover.hpp"
 #include "hg/ui.hpp"
 #include "hg/vad.hpp"
 
@@ -88,6 +89,9 @@ class App {
   void on_transport_text(std::string_view text);
   void on_transport_binary(const uint8_t* data, size_t len);
   void on_transport_closed(std::string_view reason);
+  // The port has destroyed the previous WebSocket client and opened the next
+  // one. The connect timeout is measured from here when the open had to wait.
+  void on_transport_armed();
   void on_button(Button button, bool pressed);
   void on_mic_samples(const int16_t* samples, size_t count);
 
@@ -153,6 +157,10 @@ class App {
   std::function<void(std::string_view key)> on_setting_changed;
   // The name of the Wi-Fi network the device is on, or empty; for `wifi list`.
   std::function<std::string()> current_wifi;
+  // Drop the station and join it again (a stale association, or `reconnect`).
+  // False when this port has no station. Must not call back into the app; the
+  // disconnect arrives later as on_network(false).
+  std::function<bool()> on_rejoin_wifi;
   // Adds the port's facts to the console's `diag` report: memory, reset reason,
   // radio, which drivers came up.
   std::function<void(json::Value& report)> on_diag;
@@ -233,8 +241,12 @@ class App {
   void render(const UiModel& m);
   std::string setting(std::string_view key, std::string_view fallback = {}) const;
   void connect_now();
-  void schedule_reconnect();
-  void drop_session(std::string_view reason);
+  void arm_reconnect(uint32_t delay_ms, bool hold_for_wifi);
+  // `connect_failed` is a handshake that never opened (the app's own timeout,
+  // or the client giving up while still connecting). Those count toward
+  // rejoining Wi-Fi and, later, a restart. A server that hung up does not.
+  void drop_session(std::string_view reason, bool connect_failed = false);
+  uint8_t jitter_byte() const;
   bool send(const json::Value& msg);
   void send_hello();
   bool can_talk() const;
@@ -333,11 +345,12 @@ class App {
   uint32_t boot_until_ = 0;
   uint32_t reconnect_at_ = 0;
   bool reconnect_pending_ = false;
+  uint32_t rejoin_wait_until_ = 0;  // station rejoin that never dropped the link
   uint32_t phase_since_ = 0;
   uint32_t online_since_ = 0;
   uint32_t last_rx_ = 0;
   uint32_t heartbeat_ms_ = 20000;
-  int backoff_ = 0;
+  LinkRecover link_;
   int attempts_ = 0;
   std::string fatal_;   // unrecoverable until reconfigured
   std::string last_close_;

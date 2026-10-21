@@ -788,7 +788,7 @@ gadget> status
 | `phone` / `phone pair` / `phone pair close` / `phone forget` | On boards with Bluetooth: phone app state, open or close pairing, or remove every paired phone ([protocol](protocol.md#phone-app-over-bluetooth)) |
 | `perf` / `perf on` / `perf off` / `perf bench` | Frame timing and the renderer bench ([measure frame timing](development.md#measure-frame-timing)) |
 | `yes` / `no` | Answer the question on screen |
-| `reconnect` | Drop and re-open the Hermes connection |
+| `reconnect` | Rejoin Wi-Fi, then open a new Hermes connection |
 | `forget-key` | New device identity on next boot (re-enrollment and re-pairing) |
 | `factory-reset` | Erase the device key and all settings |
 
@@ -824,6 +824,8 @@ A join that names no access point first scans every channel. To skip that, the d
 
 - **At boot and after the link drops,** the first attempt on the same network aims at that access point on that channel, with no scan.
 - **If that attempt fails,** for example because the router moved to another channel or the device is somewhere else, the device joins normally at once: the usual scan and retries in [saved Wi-Fi networks](#saved-wi-fi-networks). The failed fast attempt doesn't count against the network or lengthen the battery backoff. The next good join replaces the record.
+- **A beacon timeout, a channel switch, or no access point where the record says** also skips the saved channel and scans. The station reports a quiet access point after about 6 s of missed beacons, including one that moved channel without the station following. Until that, the association can still look joined.
+- **Hermes stays unreachable** (the socket never opens, three times) drops the station and joins it the same way, even when the driver still reports a link and an address. `reconnect` does that immediately. Six connect timeouts in a row restart the device.
 - **DHCP** asks for the last address first (`CONFIG_LWIP_DHCP_RESTORE_LAST_IP`, on for every board), which skips the discovery round when the router still has the lease.
 - **Static address (opt-in):** with `CONFIG_HG_WIFI_REUSE_IP` (menuconfig, **Hermes Gadget**), a fast join reuses the last lease as a static address and skips DHCP. Turn it on only when the router reserves that address for the device. Nothing renews the lease, and an address the router gave to someone else in the meantime conflicts. Every other join uses DHCP.
 - Forgetting a network forgets its record.
@@ -834,7 +836,7 @@ How long a reconnect takes has not been measured on hardware for this firmware.
 
 1. **Boot:** about 1 s.
 2. **Wi-Fi:** the first [saved network](#saved-wi-fi-networks), else the one from menuconfig. Without credentials the device opens a temporary network for [phone setup](setup-board.md#set-up-wi-fi-with-your-phone).
-3. **Connect:** the device opens the WebSocket to `server`, retrying 1 → 30 s with backoff.
+3. **Connect:** the device opens the WebSocket to `server`. Each try is a new client, and the name is looked up again. Waits grow from 1 s to 30 s with a little jitter.
 4. **Authenticate:** it enrolls its key on first contact and proves it with an HMAC afterwards.
 5. **Pair or ready:** an unpaired device shows a pairing code (approve with `hermes gadget pair`); a paired one goes to **Ready**.
 

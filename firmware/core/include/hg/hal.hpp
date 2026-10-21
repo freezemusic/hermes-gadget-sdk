@@ -103,6 +103,9 @@ class System {
   virtual uint64_t now_us() { return static_cast<uint64_t>(now_ms()) * 1000; }
   virtual void random_bytes(uint8_t* out, size_t len) = 0;
   virtual void log(LogLevel level, std::string_view message) = 0;
+  // Soft-resets the device. The simulator and a host test that doesn't override
+  // this return; the ESP32 port calls esp_restart() and does not come back.
+  virtual void restart() {}
   // Dozing: the screen is off, nothing is happening and the device runs on its
   // battery. The port may let the chip sleep between events; input, the network
   // and the power key still reach the app, only less often (App::kDozeWaitMs).

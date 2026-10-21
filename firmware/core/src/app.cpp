@@ -64,8 +64,7 @@ constexpr size_t kMicChunkSamples = 640;  // 40 ms at 16 kHz per binary frame
 constexpr size_t kOtaAckBytes = 16 * 1024;  // a firmware update acknowledges every 16 KB written
 constexpr uint32_t kOtaIdleMs = 30000;      // ...and is abandoned when no data comes for this long
 constexpr uint32_t kOtaRestartMs = 1000;    // time for ota.done to leave before the restart
-constexpr uint32_t kBackoffMs[] = {1000, 2000, 4000, 8000, 15000, 30000};
-constexpr size_t kBackoffSteps = sizeof(kBackoffMs) / sizeof(kBackoffMs[0]);
+constexpr uint32_t kRejoinWaitMs = 5000;    // a station rejoin that never drops the link
 
 const char* const kSettingKeys[] = {"name", "server", "token", "talk_mode", "volume", "brightness", "screen_timeout", "battery_display", "battery_estimate", "wifi_ssid", "wifi_pass"};
 
@@ -250,6 +249,7 @@ void App::on_network(bool up, std::string_view detail) {
   network_up_ = up;
   network_detail_ = std::string(detail);
   if (!up) {
+    rejoin_wait_until_ = 0;
     if (phase_ == Phase::Connecting || phase_ == Phase::Handshake || phase_ == Phase::Online) {
       hal_.transport->close();
       drop_session("network lost");
@@ -268,6 +268,7 @@ void App::on_network(bool up, std::string_view detail) {
 
 void App::connect_now() {
   reconnect_pending_ = false;
+  rejoin_wait_until_ = 0;
   if (server_url_.empty()) {
     fatal_ = "No Hermes server configured";
     phase_ = Phase::NoNetwork;
@@ -284,15 +285,20 @@ void App::connect_now() {
   update_model();
 }
 
-void App::schedule_reconnect() {
-  if (online_since_ && now() - online_since_ >= kStableSessionMs) backoff_ = 0;
-  uint32_t delay = kBackoffMs[std::min<size_t>(static_cast<size_t>(backoff_), kBackoffSteps - 1)];
-  if (backoff_ < static_cast<int>(kBackoffSteps) - 1) ++backoff_;
-  reconnect_at_ = now() + delay;
-  reconnect_pending_ = network_up_;
+uint8_t App::jitter_byte() const {
+  uint8_t b = 0;
+  if (hal_.system) hal_.system->random_bytes(&b, 1);
+  return b;
 }
 
-void App::drop_session(std::string_view reason) {
+void App::arm_reconnect(uint32_t delay_ms, bool hold_for_wifi) {
+  reconnect_at_ = now() + delay_ms;
+  if (!reconnect_at_) reconnect_at_ = 1;  // 0 would look like "nothing scheduled" after a wrap
+  reconnect_pending_ = network_up_ && !hold_for_wifi;
+  rejoin_wait_until_ = hold_for_wifi ? now() + kRejoinWaitMs : 0;
+}
+
+void App::drop_session(std::string_view reason, bool connect_failed) {
   last_close_ = std::string(reason);
   if (ota_busy()) {
     if (ota_ == Ota::Receiving) hal_.updater->abort();
@@ -309,14 +315,32 @@ void App::drop_session(std::string_view reason) {
   dash_rows_.clear();
   clear_prompt();
   transport_active_ = false;
-  schedule_reconnect();
+  if (online_since_ && now() - online_since_ >= kStableSessionMs) link_.on_settled();
   online_since_ = 0;
+  bool hold = false;
+  uint32_t delay = 0;
+  if (connect_failed) {
+    const LinkRecover::Decision decision = link_.on_connect_timeout(jitter_byte());
+    delay = decision.wait_ms;
+    if (decision.action == LinkRecover::Action::Restart) {
+      log(LogLevel::Error, "Hermes connect kept timing out; restarting");
+      if (!ota_busy()) hal_.system->restart();
+    } else if (decision.action == LinkRecover::Action::RejoinWifi) {
+      log(LogLevel::Warn, "Hermes connect timed out; rejoining Wi-Fi");
+      hold = on_rejoin_wifi && on_rejoin_wifi();
+    }
+  } else {
+    delay = link_.on_other_drop(jitter_byte());
+  }
+  arm_reconnect(delay, hold);
   phase_ = network_up_ ? Phase::Connecting : Phase::NoNetwork;
   phase_since_ = now();
 }
 
 void App::on_transport_open() {
   if (!transport_active_ || phase_ != Phase::Connecting) return;
+  link_.on_opened();
+  rejoin_wait_until_ = 0;
   phase_ = Phase::Handshake;
   phase_since_ = now();
   last_rx_ = now();
@@ -324,11 +348,21 @@ void App::on_transport_open() {
   update_model();
 }
 
+void App::on_transport_armed() {
+  // The port waited out the previous client's destroy before this open, so the
+  // 10 s connect budget starts now. An open that didn't wait never calls this.
+  if (transport_active_ && phase_ == Phase::Connecting) phase_since_ = now();
+}
+
 void App::on_transport_closed(std::string_view reason) {
   // Closes we initiated (timeouts, reconfiguration) were already handled.
   if (!transport_active_) return;
   log(LogLevel::Warn, std::string("connection closed: ") + std::string(reason));
-  drop_session(reason);
+  // Tear the client down during the backoff, not at the next connect, so the
+  // TLS context and the cached lookup are gone before the retry asks for them.
+  const bool connect_failed = phase_ == Phase::Connecting;
+  hal_.transport->close();
+  drop_session(reason, connect_failed);
   update_model();
 }
 
@@ -823,7 +857,7 @@ void App::h_error(const json::Value& m) {
   if (code == "auth_failed" || code == "bad_token" || code == "protocol") {
     // Retrying immediately cannot help; surface it and back off hard.
     fatal_ = message.empty() ? code : message;
-    backoff_ = static_cast<int>(kBackoffSteps) - 1;
+    link_.on_hard_failure();
   } else {
     notice_ = message.empty() ? code : message;
     notice_until_ = now() + 8000;
@@ -1396,11 +1430,23 @@ void App::tick() {
     update_model();
   }
 
+  if (rejoin_wait_until_ && static_cast<int32_t>(t - rejoin_wait_until_) >= 0) {
+    // The station never reported the drop. Try the socket anyway.
+    rejoin_wait_until_ = 0;
+    if (network_up_ && !transport_active_) {
+      reconnect_pending_ = true;
+      reconnect_at_ = t;
+    }
+  }
+
   if (reconnect_pending_ && network_up_ && static_cast<int32_t>(t - reconnect_at_) >= 0) connect_now();
 
-  if (phase_ == Phase::Connecting && !reconnect_pending_ && t - phase_since_ > kConnectTimeoutMs) {
+  // transport_active_, not merely "phase is connecting": the backoff and a
+  // station rejoin also sit in Connecting, and must not count as another timeout.
+  if (phase_ == Phase::Connecting && transport_active_ && t - phase_since_ > kConnectTimeoutMs) {
+    log(LogLevel::Warn, "connect timeout");
     hal_.transport->close();
-    drop_session("connect timeout");
+    drop_session("connect timeout", true);
     update_model();
   } else if (phase_ == Phase::Handshake && t - phase_since_ > kHandshakeTimeoutMs) {
     hal_.transport->close();
@@ -2025,9 +2071,10 @@ std::string App::console(std::string_view raw) {
         hal_.transport->close();
         drop_session("reconfigured");
       }
-      backoff_ = 0;
+      link_.reset();
+      rejoin_wait_until_ = 0;
       reconnect_pending_ = network_up_;
-      reconnect_at_ = now();
+      reconnect_at_ = now() ? now() : 1;
     }
     if (on_setting_changed) on_setting_changed(key);
     update_model();
@@ -2066,9 +2113,11 @@ std::string App::console(std::string_view raw) {
       hal_.transport->close();
       drop_session("manual reconnect");
     }
-    backoff_ = 0;
-    reconnect_pending_ = network_up_;
-    reconnect_at_ = now();
+    // The console command used to open another socket on the same association.
+    // That never recovered a station stuck on the router's old channel.
+    link_.on_manual();
+    const bool hold = on_rejoin_wifi && on_rejoin_wifi();
+    arm_reconnect(0, hold);
     update_model();
     return "@ok reconnect";
   }

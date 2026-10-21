@@ -222,6 +222,35 @@ TEST("ws: the stuck limit holds across the millisecond clock wrapping") {
   CHECK(w.stuck(0xFFFFFF00u + hg::ws::kStuckMs + 1));
 }
 
+TEST("ws: the next client waits until the previous one is destroyed") {
+  hg::ws::ClientSlot slot;
+  slot.want();
+  CHECK(slot.ready());
+  slot.push();
+  CHECK(!slot.ready());
+  slot.push();
+  CHECK(!slot.destroyed());  // one client still tearing down
+  CHECK(slot.destroyed());   // the last one, and a connect is still wanted
+  CHECK(slot.ready());
+}
+
+TEST("ws: cancelling the connect drops the open that would have followed the destroy") {
+  hg::ws::ClientSlot slot;
+  slot.want();
+  slot.push();
+  slot.cancel();
+  CHECK(!slot.destroyed());
+  CHECK(!slot.ready());
+}
+
+TEST("ws: a close the send task never took does not block the next client") {
+  hg::ws::ClientSlot slot;
+  slot.want();
+  slot.push();
+  slot.unpush();
+  CHECK(slot.ready());
+}
+
 TEST("ws: no item that ends by itself is taken for stuck") {
   // A send waits for the client's lock, then writes; a close sends its frame the
   // same way, then waits for the client's task, which ends within the network timeout.

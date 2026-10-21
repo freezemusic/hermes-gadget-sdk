@@ -40,6 +40,7 @@
 `App` is not thread-safe, and that is deliberate.
 
 - Ports call `App::tick()` every 5–20 ms and deliver every asynchronous event (Wi-Fi up, WebSocket frame, microphone chunk, button edge, console line) on that same thread.
+- The Hermes WebSocket is recreated for every attempt. Connect timeouts back off from 1 s to 30 s (`hg/link_recover.hpp`); three in a row ask the port to rejoin Wi-Fi, and six restart the device. A server that closes the socket just backs off.
 - On the ESP32, driver tasks post to a FreeRTOS queue that the main task drains.
 - In the simulator, the WebSocket thread posts to a Python queue that the UI thread drains.
 

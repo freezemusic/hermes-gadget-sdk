@@ -10,6 +10,8 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "lwip/dns.h"
+#include "lwip/tcpip.h"
 
 namespace hgp {
 namespace {
@@ -38,14 +40,32 @@ struct EspOps {
 
 uint32_t now_ms() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 
+void clear_dns(void*) { dns_clear_cache(); }
+
 uint32_t generation_of(const esp_websocket_event_data_t* d) {
   return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(d->user_context));
 }
 
 }  // namespace
 
-void WsTransport::connect(const std::string& url, const std::string& subprotocol) {
-  close();
+void WsTransport::retire_current() {
+  gens_.leave();  // anything still queued from the old connection is now stale
+  if (!client_) return;
+  // The send task closes and destroys the client after whatever it is sending.
+  // On a dead link that can take as long as the handshake timeout, and the app
+  // task must not wait. The next client is not created until this destroy ends
+  // (ClientSlot): two handshakes at once kept a stuck TLS context alive.
+  slot_.push();
+  TxItem item{client_, 0, hg::ws::kClose, nullptr, 0};
+  client_ = nullptr;
+  if (!tx_ || xQueueSend(tx_, &item, pdMS_TO_TICKS(hg::ws::kHandoffTimeoutMs)) != pdTRUE) {
+    ESP_LOGE(TAG, "the send task took no close for %u ms", static_cast<unsigned>(hg::ws::kHandoffTimeoutMs));
+    slot_.unpush();
+    handoff_failed_ = true;
+  }
+}
+
+void WsTransport::open_client() {
   if (!tx_) {
     tx_ = xQueueCreate(hg::ws::kTxMessages + hg::ws::kTxReserved, sizeof(TxItem));
     if (!tx_ || xTaskCreate(&WsTransport::tx_task, "hg-ws-tx", 6144, this, 5, nullptr) != pdPASS) {
@@ -56,8 +76,10 @@ void WsTransport::connect(const std::string& url, const std::string& subprotocol
       return;
     }
   }
-  url_ = url;
-  subprotocol_ = subprotocol;
+  // lwIP caches the last answer. A restarted gateway (a Tailscale Funnel name
+  // included) can be a new address while this cache still names the old one,
+  // and every new client would connect to it until something rebooted.
+  if (tcpip_callback_wait(clear_dns, nullptr) != ERR_OK) ESP_LOGW(TAG, "couldn't clear the DNS cache");
   esp_websocket_client_config_t cfg = {};
   cfg.uri = url_.c_str();
   cfg.subprotocol = subprotocol_.c_str();
@@ -76,24 +98,33 @@ void WsTransport::connect(const std::string& url, const std::string& subprotocol
     return;
   }
   esp_websocket_register_events(client_, WEBSOCKET_EVENT_ANY, &WsTransport::on_event, this);
+  ESP_LOGI(TAG, "new websocket client");
   if (esp_websocket_client_start(client_) != ESP_OK) {
     events::post(EventType::WsClosed, "client start failed", 19, gens_.current());
   }
 }
 
-void WsTransport::close() {
-  gens_.leave();  // anything still queued from the old connection is now stale
-  if (!client_) return;
-  // The send task closes and destroys the client after whatever it is sending:
-  // on a dead link that can take seconds, and the app task must not wait.
-  TxItem item{client_, 0, hg::ws::kClose, nullptr, 0};
-  client_ = nullptr;
-  // The reserved slots keep room for this. If even they are full, the send task
-  // is stuck: the client is left behind and stuck() asks for a restart.
-  if (xQueueSend(tx_, &item, pdMS_TO_TICKS(hg::ws::kHandoffTimeoutMs)) != pdTRUE) {
-    ESP_LOGE(TAG, "the send task took no close for %u ms", static_cast<unsigned>(hg::ws::kHandoffTimeoutMs));
-    handoff_failed_ = true;
+void WsTransport::connect(const std::string& url, const std::string& subprotocol) {
+  url_ = url;
+  subprotocol_ = subprotocol;
+  slot_.want();
+  retire_current();
+  if (slot_.ready()) {
+    slot_.cancel();
+    open_client();
   }
+}
+
+void WsTransport::arm() {
+  // The send task finished destroying the previous client. Called on the app task.
+  if (!slot_.ready()) return;
+  slot_.cancel();
+  open_client();
+}
+
+void WsTransport::close() {
+  slot_.cancel();
+  retire_current();
 }
 
 bool WsTransport::stuck() const { return handoff_failed_ || watch_.stuck(now_ms()); }
@@ -124,8 +155,12 @@ void WsTransport::tx_task(void* arg) {
   for (;;) {
     if (xQueueReceive(self->tx_, &item, portMAX_DELAY) != pdTRUE) continue;
     self->watch_.begin(now_ms());
-    if (hg::ws::process(item, self->gens_.current(), ops) == hg::ws::Outcome::Failed) ESP_LOGW(TAG, "send failed");
+    const hg::ws::Outcome outcome = hg::ws::process(item, self->gens_.current(), ops);
     self->watch_.end();
+    if (outcome == hg::ws::Outcome::Failed) ESP_LOGW(TAG, "send failed");
+    // The app task opens the next client only after this destroy, and only if
+    // a connect is still wanted. Posting from here keeps that open off this task.
+    if (item.opcode == hg::ws::kClose && self->slot_.destroyed()) events::post(EventType::WsArm);
     free(const_cast<uint8_t*>(item.data));
   }
 }
