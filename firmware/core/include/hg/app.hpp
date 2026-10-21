@@ -429,6 +429,9 @@ class App {
   uint32_t voice_at_ = 0;
   bool happy_arm_ = false;  // a successful turn wants a smile the next time the face shows
   uint32_t happy_until_ = 0;  // face frame the smile runs until; 0 = off
+  // Reply text waits until that smile has played. Starting the linger at
+  // turn.end put the Ready screen up before the face could morph out or smile.
+  bool reply_after_smile_ = false;
   bool face_stepped_ = false;
   uint8_t face_morph_ = 0;       // 0 body .. 100 three dots
   uint8_t face_shape_ = 0;       // 0 circle, 1 pebble, 2 squircle, 3 triangle

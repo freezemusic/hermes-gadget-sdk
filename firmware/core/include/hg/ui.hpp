@@ -176,10 +176,6 @@ class Ui {
   uint32_t hero_static_ = 0, hero_anim_ = 0;
   uint32_t battery_hash_ = 0;
   bool hero_valid_ = false;
-  // The previous hero frame drew outside the eye band (a morph, a shape blend,
-  // rings, or the sleep collapse). The next flush stays wide so those pixels
-  // are cleared when the silhouette settles.
-  bool hero_wide_ = false;
   bool valid_ = false;
   // frame timing (measure)
   FrameStats* stats_ = nullptr;

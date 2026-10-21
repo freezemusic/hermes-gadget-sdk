@@ -30,8 +30,9 @@ namespace hg::face {
 
 // Body gradient stops, RGB888. Light is the top-left, the named colour is the
 // middle, and shade is a deeper version of the same hue at the bottom-right.
-// RGB565 cannot hold these exactly; rgb565() quantises them, and the disc
-// dithers so the steps do not band.
+// RGB565 cannot hold these exactly; rgb565() quantises them. The disc dithers
+// with a 2-step ordered term plus Floyd–Steinberg, so the truncated remainder
+// is spread instead of drawing as rings.
 constexpr uint8_t kBlueR = 0x49, kBlueG = 0x9B, kBlueB = 0xF1;
 constexpr uint8_t kBlueHiR = 0xA9, kBlueHiG = 0xD4, kBlueHiB = 0xFC;
 constexpr uint8_t kBlueCoreR = 0xC5, kBlueCoreG = 0xE4, kBlueCoreB = 0xFE;
@@ -115,8 +116,10 @@ struct Sample {
 Sample sample(uint32_t frame, Mood mood, uint8_t level, uint8_t voice, bool dots);
 
 // Hash of the pixels that will be drawn at this diameter. Equal keys mean the
-// moving band does not need another flush. Speaking, the loading swirl and the
-// three-dot pulse mix in the raw frame.
+// pose did not move. Level and voice are part of it. Speaking, the loading
+// swirl and the three-dot pulse also mix in the raw frame. The UI still
+// flushes a live face every tick: a key that misses a blink is how the panel
+// stayed on one paint.
 uint32_t picture_key(uint32_t frame, Mood mood, uint8_t level, uint8_t voice, bool dots, int diameter,
                      const Style& style = {});
 

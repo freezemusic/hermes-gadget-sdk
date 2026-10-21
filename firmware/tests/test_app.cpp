@@ -86,6 +86,7 @@ struct FakeHal : hg::Display, hg::AudioIn, hg::AudioOut, hg::Transport, hg::Stor
     d.height = static_cast<uint16_t>(height);
     d.round = round;
     d.emissive = emissive;
+    d.corner_inset = corner_inset;
     d.has_backlight = backlight;
     return d;
   }
@@ -95,6 +96,7 @@ struct FakeHal : hg::Display, hg::AudioIn, hg::AudioOut, hg::Transport, hg::Stor
     fb.assign(static_cast<size_t>(diameter * diameter), 0);
   }
   uint16_t* framebuffer() override { return fb.data(); }
+  uint8_t corner_inset = 0;
   bool lit_while_dozing = false;  // the screen was turned on before the port woke
   void set_backlight(uint8_t percent) override {
     brightness = percent;
@@ -786,20 +788,25 @@ TEST("app: the face fills idle, listening and thinking screens") {
   r.advance(500);
   r.app.on_button(hg::Button::Talk, false);
   CHECK(r.app.screen() == hg::Screen::Thinking && r.app.model().hero);
-  // Audio before text: the face speaks; text arrives: the reply takes the screen.
+  // Audio before text: the face keeps speaking when the words arrive. The text
+  // screen waits until playback, the morph and a successful smile are done.
   r.server(R"({"type":"audio.start","stream":2,"rate":16000,"format":"pcm16"})");
   CHECK(r.app.screen() == hg::Screen::Responding && r.app.model().hero);
   r.server(R"({"type":"reply","text":"Done."})");
-  CHECK(!r.app.model().hero);
+  CHECK(r.app.screen() == hg::Screen::Responding && r.app.model().hero);
 }
 
-TEST("app: a finished reply stays readable, then the face returns; UP brings it back") {
+TEST("app: a finished reply smiles, then stays readable; UP brings it back") {
   Rig r;
   r.bring_online(true);
   r.server(R"({"type":"turn.start","turn":"t"})");
   r.server(R"({"type":"reply","turn":"t","text":"Here is the answer."})");
   r.server(R"({"type":"turn.end","turn":"t","outcome":"success"})");
   r.advance(200);
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  CHECK(r.app.model().hero);  // the smile plays before the Ready text
+  CHECK(r.app.model().face_happy);
+  r.advance(4000);  // the smile is about 3 s, then the reply is readable
   CHECK(r.app.screen() == hg::Screen::Ready);
   CHECK(!r.app.model().hero);
   CHECK_EQ(r.app.model().body, std::string("Here is the answer."));
@@ -810,19 +817,98 @@ TEST("app: a finished reply stays readable, then the face returns; UP brings it 
   CHECK_EQ(r.app.model().body, std::string("Here is the answer."));
 }
 
-TEST("app: hero animation redraws only a slice of the screen") {
+TEST("app: hero animation redraws the face, not the whole screen") {
   Rig r;
   r.bring_online(true);
   r.advance(200);
   int flushes = r.fake.flushes, rows = r.fake.flushed_rows;
-  r.advance(6000);  // at least one blink cycle, nothing else changing
+  r.advance(6000);  // blinks, glances and the idle reactions
   flushes = r.fake.flushes - flushes;
   rows = r.fake.flushed_rows - rows;
   CHECK(flushes > 0);
-  // Blinks and glances flush the eye band, not the whole hero area (~196 rows
-  // on this 320x240 panel). The disc itself stays put.
-  CHECK(rows / flushes < 90);
-  CHECK(rows / flushes < r.fake.height / 2);
+  // Every live tick flushes the silhouette and the caption. The bars stay.
+  const int band = rows / flushes;
+  CHECK(band > 40);
+  CHECK(band < r.fake.height - 8);
+}
+
+bool blue_dominant_px(uint16_t p) {
+  const int r = (p >> 11) & 31;
+  const int g = (p >> 5) & 63;
+  const int b = p & 31;
+  return b >= 12 && b > r && g > r;
+}
+
+TEST("app: idle, listening and thinking ticks change the framebuffer") {
+  Rig r;
+  r.bring_online(true);
+  const std::vector<uint16_t> idle = r.fake.fb;
+  const int flushes = r.fake.flushes;
+  r.advance(2500);  // a blink and a glance land inside this window
+  CHECK(r.fake.flushes > flushes);
+  CHECK(r.fake.fb != idle);
+
+  r.app.on_button(hg::Button::Talk, true);
+  r.advance(400);  // past the minimum utterance, so release sends
+  const std::vector<uint16_t> quiet = r.fake.fb;
+  int16_t loud[160];
+  for (int i = 0; i < 160; ++i) loud[i] = 20000;
+  r.app.on_mic_samples(loud, 160);
+  r.advance(120);
+  CHECK(r.app.screen() == hg::Screen::Listening);
+  CHECK(r.fake.fb != quiet);
+
+  r.app.on_button(hg::Button::Talk, false);
+  r.server(R"({"type":"transcript","text":"hello"})");  // drops "Sending..." so the dots morph
+  r.advance(40);
+  const std::vector<uint16_t> early = r.fake.fb;
+  const int morph = r.app.model().face_morph;
+  r.advance(400);
+  CHECK(r.app.screen() == hg::Screen::Thinking);
+  CHECK(r.app.model().face_morph > morph);
+  CHECK(r.fake.fb != early);
+}
+
+TEST("app: on the 410x486 watch the caption clears the body and ONLINE clears the corner") {
+  Rig r;
+  r.fake.width = 410;
+  r.fake.height = 486;
+  r.fake.emissive = true;
+  r.fake.corner_inset = 64;
+  r.fake.fb.assign(static_cast<size_t>(410 * 486), 0);
+  r.bring_online(true);
+  r.app.on_button(hg::Button::Talk, true);
+  CHECK(r.app.screen() == hg::Screen::Listening);
+
+  const uint16_t green = hg::rgb565(61, 214, 140);
+  const uint16_t dim = hg::rgb565(132, 146, 160);
+  // The headline is a run of the listening green. The disc is blue, and a
+  // dithered body pixel is not that flat green, so the two stay separable.
+  int caption_top = -1;
+  int status_right = 0;
+  for (int y = 0; y < 486; ++y) {
+    int run = 0;
+    for (int x = 0; x < 410; ++x) {
+      const uint16_t p = r.fake.fb[static_cast<size_t>(y * 410 + x)];
+      if (y >= 30 && p == green) {
+        if (++run >= 6 && caption_top < 0) caption_top = y;
+      } else {
+        run = 0;
+      }
+      if (y < 28 && (p == green || p == dim) && x > status_right) status_right = x;
+    }
+  }
+  int body_bottom = 0;
+  for (int y = 0; y < 486; ++y) {
+    for (int x = 100; x < 310; ++x) {
+      const uint16_t p = r.fake.fb[static_cast<size_t>(y * 410 + x)];
+      if (p != green && p != dim && blue_dominant_px(p) && y > body_bottom) body_bottom = y;
+    }
+  }
+  CHECK(body_bottom > 80);
+  CHECK(caption_top > body_bottom + 12);  // the listening lines are not on the disc
+  CHECK(status_right > 200);
+  CHECK(status_right <= 410 - 90);  // inside a ~100 px corner at the top of the bar
 }
 
 TEST("app: holding CANCEL starts a new session; a short press still cancels") {

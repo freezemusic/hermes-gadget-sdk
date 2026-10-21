@@ -49,19 +49,19 @@ As a result the core has no locks and every test is deterministic.
 
 - The port owns a full RGB565 framebuffer, in PSRAM on the ESP32.
 - `Ui::render()` hashes the inputs of each band and redraws only the bands that changed, flushing them as full-width rows (contiguous memory, so a panel driver can DMA them).
-- Header animations (spinner, level meter) live in the header band and stay on the 100 ms frame. A hero face steps about every 33 ms and flushes only the eye rows; see the face section below.
+- Header animations (spinner, level meter) live in the header band and stay on the 100 ms frame. A hero face steps about every 33 ms and, while it is moving, flushes the whole face and its caption; see the face section below.
 - The renderer reads no clocks and uses no randomness. Identical models produce identical pixels, and the simulator tests rely on that.
 
 ### The face
 
-Every screen that isn't showing reply text uses a **hero layout**: a shaded body with two dark eyes, drawn in code, at about two thirds of the free square, with a short caption. That covers idle, listening, thinking, speaking before the text arrives, boot, connecting, offline, setup errors, pairing, short cards and questions. [faces.md](faces.md) is the pose table, the activity mapping and the colour and timing constants.
+Every screen that isn't showing reply text uses a **hero layout**: a shaded body with two dark eyes, drawn in code, at about two thirds of the free width, with the caption below the silhouette. That covers idle, listening, thinking, speaking before the text arrives, boot, connecting, offline, setup errors, pairing, short cards and questions. [faces.md](faces.md) is the pose table, the activity mapping and the colour and timing constants.
 
 - **Captions:** a headline and one detail line. Pairing, setup, cards and questions may wrap to three or four lines; the renderer picks the largest disc that still fits, and drops caption lines rather than shrink the face below 48 px. A question adds its two answer buttons under the caption.
 - **No scrolling needed:** a card too long for a caption gets the text layout. Long replies and long cards page by themselves (about a second per line), so a board with no scroll buttons can still read everything. UP/DOWN scrolls by hand and pauses the paging for 15 s.
 - **Drawing:** `hg::face` fills a dithered diagonal gradient and two tapered eyes. Listening grows the eyes with the microphone level. Speaking bounces them with the speaker level. Thinking morphs the body into three dots; a status phrase keeps the body and switches to a working or searching pose. Connecting draws swirl rings. The pose, the blink and the glance are a pure function of `UiModel::face_frame` and the face style fields.
 - **Clock:** other screens stay on the 100 ms frame. While a hero face is showing and the display is awake, the app also steps `face_frame` about every 33 ms. The face clock is not read while the screen is asleep.
-- **Partial redraws:** the hero band tracks static content (screen, caption) separately from the eye pose. When only the eyes change, it redraws and flushes the eye rows. While the silhouette is moving it flushes the body and the rings, and one frame after that settles, so the old shape is cleared. Speaking changes every face frame; a settled idle face does not.
-- **Reply text:** a finished reply stays on screen for 20 s before the face returns. On boards with scroll buttons, UP brings it back. A successful turn arms a short happy pose for the next time that face is up.
+- **Partial redraws:** the bars still flush only when their own inputs change. A live face flushes on every face tick, and the dirty rows are the silhouette plus the caption (dots, rings, the exclamation mark and the morph included). A finished sleep dot and the error mark do not. The picture key still describes the pose; it is not the only reason a frame is pushed.
+- **Reply text:** a successful reply plays the morph-out and the short smile on the face first. The text then stays up for 20 s. On boards with scroll buttons, UP brings it back. The smile is not deferred until that linger ends.
 - **Old bitmaps:** `hermes-gadget face` still writes 1-bit frames to `mascot_data.cpp` (about 27 KB). The UI does not reference them, so a link that drops unused sections leaves them out. The generator's own guide is the second half of [faces.md](faces.md).
 
 ### Interaction

@@ -387,7 +387,7 @@ Board option `esp32s3-touch-amoled-206`, for Waveshare's 2.06" AMOLED touch watc
 | BOOT key | | GPIO 0 |
 | Not used | QMI8658 IMU (I2C 0x6B), PCF85063 RTC (0x51), TF card | |
 
-The audio codecs and amplifier run from the always-on 3.3 V rail, so no AXP2101 rail is switched for audio. The UI uses rows 8–493 of the panel. The glass corners are rounded with a radius of about 100 px (measured with a test grid), so the status row also keeps its text 64 px (`corner_inset`) in from the sides.
+The audio codecs and amplifier run from the always-on 3.3 V rail, so no AXP2101 rail is switched for audio. The UI uses rows 8–493 of the panel. The glass corners are rounded with a radius of about 100 px (measured with a test grid). `corner_inset` is 64, and the top-right link cluster (the ONLINE dot and label) is drawn another half of that inset further in, and centred in the bar, so it stays inside the bezel. The title on the left keeps the 64 px pad.
 
 The microphones are quiet: speech averaged about 170 RMS at the default 24 dB gain, under tap mode's usual 500 floor. This profile sets 30 dB and a floor of 200 (`codec.mic_gain_db`, `codec.vad_min_rms`), and tap mode's noise estimate still raises the threshold in a loud room.
 

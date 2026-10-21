@@ -191,8 +191,9 @@ BoardConfig make() {
   b.amoled.rst = 8;
   b.amoled.gap_x = 22;      // the controller RAM is wider than the 410-wide glass
   b.amoled.gap_y = 8;       // the 8-row inset at the top
-  // The glass corners are ~100 px in radius (measured with a grid): the top bar's text, on glass
-  // rows 10-24, needs ~57 px at its top row; 64 plus the bar's 6 px pad leaves some to spare.
+  // The glass corners are ~100 px in radius (measured with a grid). 64 clears the title.
+  // The ONLINE cluster is drawn further in than this (half the inset again); 64 on its
+  // own still left that label under the bezel.
   b.amoled.corner_inset = 64;
   b.amoled.panel = AmoledPanel::Co5300_410;
   b.i2c = {15, 14, 400000};

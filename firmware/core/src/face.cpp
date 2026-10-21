@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 
 namespace hg::face {
 namespace {
@@ -422,28 +423,105 @@ int clamp8(int v) {
   return v;
 }
 
-uint16_t shade_pixel(int dx, int dy, int r, Rgb hi, Rgb mid, Rgb lo, int x, int y) {
+Rgb shade_rgb(int dx, int dy, int r, Rgb hi, Rgb mid, Rgb lo) {
   int t = 128;
   if (r > 0) {
     t = (dx + dy + 2 * r) * 255 / (4 * r);
     if (t < 0) t = 0;
     if (t > 255) t = 255;
   }
-  int r8, g8, b8;
+  Rgb o;
   if (t <= 128) {
-    r8 = hi.r + (mid.r - hi.r) * t / 128;
-    g8 = hi.g + (mid.g - hi.g) * t / 128;
-    b8 = hi.b + (mid.b - hi.b) * t / 128;
+    o.r = static_cast<uint8_t>(hi.r + (mid.r - hi.r) * t / 128);
+    o.g = static_cast<uint8_t>(hi.g + (mid.g - hi.g) * t / 128);
+    o.b = static_cast<uint8_t>(hi.b + (mid.b - hi.b) * t / 128);
   } else {
     const int u = t - 128;
-    r8 = mid.r + (lo.r - mid.r) * u / 127;
-    g8 = mid.g + (lo.g - mid.g) * u / 127;
-    b8 = mid.b + (lo.b - mid.b) * u / 127;
+    o.r = static_cast<uint8_t>(mid.r + (lo.r - mid.r) * u / 127);
+    o.g = static_cast<uint8_t>(mid.g + (lo.g - mid.g) * u / 127);
+    o.b = static_cast<uint8_t>(mid.b + (lo.b - mid.b) * u / 127);
   }
-  const int d = kBayer[(y & 3) * 4 + (x & 3)] - 8;
-  return rgb(static_cast<uint8_t>(clamp8(r8 + d)), static_cast<uint8_t>(clamp8(g8 + d)),
-             static_cast<uint8_t>(clamp8(b8 + d)));
+  return o;
 }
+
+// Floyd–Steinberg in 8-bit, with a 2-LSB ordered term so the first pixels of a
+// band already cross an RGB565 bin. The error is the part rgb565() truncates
+// (red/blue step 8, green step 4); spreading it is what breaks the radial
+// bands a 4×4 Bayer tile draws as rings. Single-threaded: the rows live in
+// static storage so the paint does not put 10 KB on the stack.
+class BodyDither {
+ public:
+  void reset(int width) {
+    width_ = width;
+    if (width_ < 0) width_ = 0;
+    if (width_ > kMax) width_ = kMax;
+    std::memset(er_, 0, sizeof(er_));
+    std::memset(eg_, 0, sizeof(eg_));
+    std::memset(eb_, 0, sizeof(eb_));
+  }
+  void next_row() {
+    if (width_ <= 0) return;
+    std::memcpy(er_[0], er_[1], static_cast<size_t>(width_) * sizeof(int16_t));
+    std::memcpy(eg_[0], eg_[1], static_cast<size_t>(width_) * sizeof(int16_t));
+    std::memcpy(eb_[0], eb_[1], static_cast<size_t>(width_) * sizeof(int16_t));
+    std::memset(er_[1], 0, static_cast<size_t>(width_) * sizeof(int16_t));
+    std::memset(eg_[1], 0, static_cast<size_t>(width_) * sizeof(int16_t));
+    std::memset(eb_[1], 0, static_cast<size_t>(width_) * sizeof(int16_t));
+  }
+  uint16_t apply(int x, int y, Rgb c) {
+    const int bay = kBayer[(y & 3) * 4 + (x & 3)] - 8;  // -8..+7
+    int r = c.r + bay * 2;
+    int g = c.g + bay;
+    int b = c.b + bay * 2;
+    const bool track = x >= 0 && x < width_;
+    if (track) {
+      r += er_[0][x];
+      g += eg_[0][x];
+      b += eb_[0][x];
+      er_[0][x] = eg_[0][x] = eb_[0][x] = 0;
+    }
+    r = clamp8(r);
+    g = clamp8(g);
+    b = clamp8(b);
+    const uint16_t q = rgb(static_cast<uint8_t>(r), static_cast<uint8_t>(g), static_cast<uint8_t>(b));
+    if (!track) return q;
+    const int rq = ((q >> 11) & 31) << 3;
+    const int gq = ((q >> 5) & 63) << 2;
+    const int bq = (q & 31) << 3;
+    spill(x, r - rq, g - gq, b - bq);
+    return q;
+  }
+
+ private:
+  static constexpr int kMax = 800;
+  int width_ = 0;
+  int16_t er_[2][kMax] = {};
+  int16_t eg_[2][kMax] = {};
+  int16_t eb_[2][kMax] = {};
+
+  static int clamp_err(int v) {
+    if (v < -96) return -96;
+    if (v > 96) return 96;
+    return v;
+  }
+  void spill(int x, int er, int eg, int eb) {
+    auto add = [&](int xx, int row, int wr, int wg, int wb) {
+      if (xx < 0 || xx >= width_) return;
+      er_[row][xx] = static_cast<int16_t>(clamp_err(er_[row][xx] + wr));
+      eg_[row][xx] = static_cast<int16_t>(clamp_err(eg_[row][xx] + wg));
+      eb_[row][xx] = static_cast<int16_t>(clamp_err(eb_[row][xx] + wb));
+    };
+    const int r7 = er * 7 / 16, g7 = eg * 7 / 16, b7 = eb * 7 / 16;
+    const int r3 = er * 3 / 16, g3 = eg * 3 / 16, b3 = eb * 3 / 16;
+    const int r5 = er * 5 / 16, g5 = eg * 5 / 16, b5 = eb * 5 / 16;
+    add(x + 1, 0, r7, g7, b7);
+    add(x - 1, 1, r3, g3, b3);
+    add(x, 1, r5, g5, b5);
+    add(x + 1, 1, er - r7 - r3 - r5, eg - g7 - g3 - g5, eb - b7 - b3 - b5);
+  }
+};
+
+BodyDither g_dither;
 
 int circle_sd(int dx, int dy, int r) {
   const int dist = isqrt_u32(static_cast<uint32_t>(dx * dx + dy * dy));
@@ -519,6 +597,7 @@ void paint_body(Canvas& c, int cx, int cy, int r, Rgb hi, Rgb mid, Rgb lo, const
   const int ext = r + 3;
   const int y0 = std::max(cy - ext, c.clip_y0());
   const int y1 = std::min(cy + ext + 1, c.clip_y1());
+  g_dither.reset(c.width());
   for (int y = y0; y < y1; ++y) {
     const int dy = y - cy;
     if (round) {
@@ -532,7 +611,7 @@ void paint_body(Canvas& c, int cx, int cy, int r, Rgb hi, Rgb mid, Rgb lo, const
         const int sd = isqrt_u32(static_cast<uint32_t>(dx * dx + dy * dy)) - r;
         const int cov = coverage(sd);
         if (cov <= 0) continue;
-        const uint16_t col = shade_pixel(dx, dy, r, hi, mid, lo, x, y);
+        const uint16_t col = g_dither.apply(x, y, shade_rgb(dx, dy, r, hi, mid, lo));
         if (cov >= 256) c.pixel(x, y, col);
         else c.blend(x, y, col, cov);
       }
@@ -541,11 +620,12 @@ void paint_body(Canvas& c, int cx, int cy, int r, Rgb hi, Rgb mid, Rgb lo, const
         const int sd = blended_sd(dx, dy, r, style);
         const int cov = coverage(sd);
         if (cov <= 0) continue;
-        const uint16_t col = shade_pixel(dx, dy, r, hi, mid, lo, cx + dx, y);
+        const uint16_t col = g_dither.apply(cx + dx, y, shade_rgb(dx, dy, r, hi, mid, lo));
         if (cov >= 256) c.pixel(cx + dx, y, col);
         else c.blend(cx + dx, y, col, cov);
       }
     }
+    g_dither.next_row();
   }
 }
 
@@ -825,8 +905,11 @@ uint32_t picture_key(uint32_t frame, Mood mood, uint8_t level, uint8_t voice, bo
       .val(style.asleep)
       .val(style.swirl)
       .val(style.busy)
-      .val(diameter);
-  if (style.swirl || style.morph >= 80) k.val(static_cast<int>(frame));
+      .val(diameter)
+      .val(static_cast<int>(level))
+      .val(static_cast<int>(voice));
+  // Swirl, the dot pulse and speaking move on frames the eye pose does not.
+  if (style.swirl || style.morph >= 80 || mood == Mood::Speaking) k.val(static_cast<int>(frame));
   if (eyes_visible(mood, style)) {
     Sample s = sample(frame, mood, level, voice, dots);
     if (style.swirl) s.blink = 0;
@@ -834,7 +917,6 @@ uint32_t picture_key(uint32_t frame, Mood mood, uint8_t level, uint8_t voice, bo
     k.val(q(s.left.x)).val(q(s.left.y)).val(q(s.left.w)).val(q(drawn_h(s.left.h, s.blink))).val(s.left.tilt);
     k.val(q(s.right.x)).val(q(s.right.y)).val(q(s.right.w)).val(q(drawn_h(s.right.h, s.blink))).val(s.right.tilt);
   }
-  if (mood == Mood::Speaking) k.val(static_cast<int>(frame));
   return k.get();
 }
 

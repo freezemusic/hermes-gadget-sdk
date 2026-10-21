@@ -102,6 +102,18 @@ uint32_t hero_anim_key(const UiModel& m, int diameter) {
                            m.voice, face::dots_for(m.screen, m.face_busy), diameter, style);
 }
 
+// True while the face can change pixels from one face tick to the next.
+// A finished sleep dot and the error mark stay still; everything else blinks,
+// glances, breathes, pulses or is mid-morph, and has to be flushed.
+bool face_live(const UiModel& m) {
+  const face::Style s = face_style(m);
+  if (s.swirl || s.wake < 100 || s.morph > 0) return true;
+  if (s.shape_k > 0 && s.shape_k < 100) return true;
+  const face::Mood mood = face::mood_for(m.screen, m.face_happy, m.face_reaction, m.face_busy);
+  if (mood == face::Mood::Alert || mood == face::Mood::Sleep || mood == face::Mood::Sleepy) return false;
+  return true;
+}
+
 uint16_t tone_color(DashRow::Tone t) {
   switch (t) {
     case DashRow::Tone::Busy: return kBlue;
@@ -285,19 +297,21 @@ void Ui::draw_frame(const UiModel& m) {
     const int face_d = hero_geom(m).size;
     uint32_t anim = hero_anim_key(m, face_d);
     int y0 = y_header, y1 = y_bottom;
-    bool redraw = !valid_ || !hero_valid_ || stat != hero_static_;
-    if (!redraw && anim != hero_anim_) {
-      hero_anim_rows(m, y0, y1);  // eye band, or the whole body while it is changing shape
-      redraw = true;
-    }
-    if (redraw) {
+    // A caption or screen change clears the whole hero area. While the face
+    // itself is moving, every tick flushes the silhouette and the caption,
+    // not only the eye band: blinks, glances, mic level, the dot pulse and
+    // the morph all have to reach the panel. Gating those on a picture key
+    // left the watch on the last full paint (frames stayed at 0).
+    const bool full = !valid_ || !hero_valid_ || stat != hero_static_;
+    const bool moved = anim != hero_anim_ || face_live(m);
+    if (full || moved) {
+      if (!full) hero_anim_rows(m, y0, y1);
       c.set_clip_rows(y0, y1);
       draw_hero(c, m);
       flush(y0, y1);
     }
     hero_static_ = stat;
     hero_anim_ = anim;
-    hero_wide_ = face::anim_wide(face_style(m));
     hero_valid_ = true;
     hash_[1] = hash_[2] = 0;  // header and content must repaint when hero mode ends
     valid_ = true;
@@ -355,8 +369,13 @@ void Ui::draw_top(Canvas& c, const UiModel& m) {
     return;
   }
   const int pad = 3 * s + panel_.corner_inset;
+  // The link cluster is the rightmost ink. On a ~100 px corner the arc at the
+  // top of the bar still covers a plain `corner_inset`, so the cluster steps
+  // further left than the title. Square panels (inset 0) are unchanged.
+  const int right_pad = pad + panel_.corner_inset / 2;
   int label_w = Canvas::text_width(label, s);
-  int label_x = w - pad - label_w;
+  int label_x = w - right_pad - label_w;
+  ty = std::max(s, (layout_.top_h - font::kGlyphHeight * s) / 2);
   c.text(label_x, ty, label, s, kDim);
   int r = std::max(2, 3 * s / 2 + 1);
   const int dot_x = label_x - 3 * s - r;
@@ -717,27 +736,38 @@ Ui::HeroGeom Ui::hero_geom(const UiModel& m) const {
   }
   // Reserve one detail line even when there is none, so the face keeps its size.
   const int ch = caption_h(std::max<int>(1, static_cast<int>(g.detail.size())));
-  const int avail = std::min(w - 8 * s, layout_.main_h - ch - buttons_h - 4 * s);
-  // The body is about two thirds of the free square, so the field and the
-  // caption stay clear of it. Rings extend past the disc; `rim` reserves that.
-  const int slot = std::max(16, avail);
-  g.size = std::max(16, slot * 68 / 100);
-  const int rim = std::max(s, g.size * 16 / 100);
-  const int block = g.size + rim + 2 * s + ch + buttons_h;
+  const int gap = lh;  // one clear text line under the silhouette, above the caption
+  // Rings reach 74% of the diameter from the centre, which is 24% past the
+  // disc. The caption starts below that, or it is drawn across the body.
+  constexpr int kOverhangPct = 24;
+  const int room = layout_.main_h - ch - buttons_h - gap - 4 * s;
+  const int max_by_h = std::max(16, room > 0 ? room * 100 / (100 + kOverhangPct) : 16);
+  const int max_by_w = std::max(16, (w - 8 * s) * 66 / 100);
+  g.size = std::min(max_by_h, max_by_w);
+  const int overhang = std::max(s, g.size * kOverhangPct / 100);
+  const int block = g.size + overhang + gap + ch + buttons_h;
   g.x = (w - g.size) / 2;
   g.y = layout_.main_y + std::max(s, (layout_.main_h - block) / 2);
-  g.caption_y = g.y + g.size + rim;
+  g.caption_y = g.y + g.size + overhang + gap;
   g.buttons_y = g.caption_y + ch + 2 * s;
   return g;
 }
 
 void Ui::hero_anim_rows(const UiModel& m, int& y0, int& y1) const {
   const HeroGeom g = hero_geom(m);
-  const face::Style style = face_style(m);
+  const int s = layout_.scale;
+  const int lh = Canvas::line_height(s);
   int top = 0, bottom = 0;
-  face::anim_rows(g.y + g.size / 2, g.size, top, bottom, face::anim_wide(style) || hero_wide_, style.morph);
-  y0 = std::max(top, layout_.top_h);
-  y1 = std::min(bottom, static_cast<int>(info_.height) - layout_.bottom_h);
+  // Disc, rings, dots, the bang and the morph all sit inside the wide rect.
+  // The caption is in the same flush so a later tick cannot leave the line
+  // painted across the body.
+  face::anim_rows(g.y + g.size / 2, g.size, top, bottom, true, 0);
+  const int lines = 1 + static_cast<int>(g.detail.size());
+  bottom = std::max(bottom, g.caption_y + lines * lh + s);
+  if (!m.yes.empty() || !m.no.empty()) bottom = std::max(bottom, g.buttons_y + lh + 4 * s);
+  if (g.y < top) top = g.y;
+  y0 = std::max(top - 2, layout_.top_h);
+  y1 = std::min(bottom + 2, static_cast<int>(info_.height) - layout_.bottom_h);
   if (y1 < y0) y1 = y0;
 }
 

@@ -502,6 +502,7 @@ void App::h_turn_start(const json::Value& m) {
   status_.clear();
   happy_arm_ = false;
   happy_until_ = 0;
+  reply_after_smile_ = false;
   surprised_until_ = 0;
   confused_until_ = 0;
   confuse_arm_ = false;
@@ -966,6 +967,7 @@ void App::start_listening(bool hands_free) {
   mode_since_ = now();
   happy_arm_ = false;
   happy_until_ = 0;
+  reply_after_smile_ = false;
   reply_.clear();
   status_.clear();
   user_echo_.clear();
@@ -1027,6 +1029,7 @@ void App::cancel_turn() {
   send(proto::message("cancel"));
   mode_ = Mode::Idle;
   mode_since_ = now();
+  reply_after_smile_ = false;
   set_hint_flash("Cancelled");
 }
 
@@ -1430,12 +1433,17 @@ void App::tick() {
     notice_until_ = t + 8000;
     update_model();
   }
-  if (mode_ == Mode::Responding && !speaking()) {
+  if (mode_ == Mode::Responding && !speaking() && face_morph_ == 0) {
     bool settled = turn_done_ || (reply_final_ && t - last_turn_rx_ > kSettleAfterReplyMs);
     if (settled) {
       mode_ = Mode::Idle;
       mode_since_ = t;
-      reply_until_ = t + kReplyLingerMs;
+      // The smile plays on the face first. The Ready text starts when it ends,
+      // so the 20 s linger is reading time and not the smile.
+      if (!reply_.empty() && (happy_arm_ || (happy_until_ != 0 && face_frame_ < happy_until_)))
+        reply_after_smile_ = true;
+      else if (!reply_.empty())
+        reply_until_ = t + kReplyLingerMs;
       update_model();
     }
   }
@@ -1497,7 +1505,13 @@ void App::tick() {
       voice_ = voice_ > 12 ? static_cast<uint8_t>(voice_ - 12) : 0;
       voice_at_ = t;
     }
-    if (happy_until_ && face_frame_ >= happy_until_) happy_until_ = 0;
+    if (happy_until_ && face_frame_ >= happy_until_) {
+      happy_until_ = 0;
+      if (reply_after_smile_) {
+        reply_after_smile_ = false;
+        if (!reply_.empty()) reply_until_ = t + kReplyLingerMs;
+      }
+    }
     face_stepped_ = true;
     stepped = true;
   }
@@ -1701,8 +1715,9 @@ void App::update_model() {
     m.detail = status_;
     m.body = reply_;
     m.hint = profile_.touch_screen ? "Hold to reply" : talk + " to reply";
-    // Spoken audio can start before the text arrives: let the face talk meanwhile.
-    m.hero = reply_.empty();
+    // The face keeps talking while audio plays, and while the body is still
+    // morphing out of the three dots. Reply text replaces it only after that.
+    m.hero = reply_.empty() || m.speaking || face_morph_ > 0;
   } else {
     m.screen = Screen::Ready;
     m.headline = "Ready";
@@ -1724,36 +1739,54 @@ void App::update_model() {
       *power_status_->battery_percent <= 10 && power_status_->external_power == false)
     m.detail = "Low battery: connect USB";
   if (!hint_flash_.empty()) m.hint = hint_flash_;
-  // The smile starts on the first frame the idle face is actually up, including
-  // when a reply's text has just given the screen back.
-  if (m.hero && m.screen == Screen::Ready && happy_arm_) {
-    happy_until_ = face_frame_ + kHappyFrames;
-    happy_arm_ = false;
-  }
+  // step_face reads this for the idle-sleep timer. The smile may arm just below,
+  // after the morph for this tick is known.
   m.face_happy = m.hero && happy_until_ != 0 && face_frame_ < happy_until_;
   if (face_stepped_) {
     face_stepped_ = false;
     step_face(m);
   }
+  // A morph still on screen, or a smile that has not played yet, keeps the
+  // face up. Otherwise turn.end drops straight onto the Ready text.
+  if (face_morph_ > 0 &&
+      (m.screen == Screen::Thinking || m.screen == Screen::Responding || m.screen == Screen::Ready))
+    m.hero = true;
+  if (happy_arm_ && !reply_.empty() && face_morph_ == 0 &&
+      (m.screen == Screen::Responding || m.screen == Screen::Ready)) {
+    m.hero = true;
+    m.body.clear();
+  }
+  // The smile starts once the dots have finished morphing back, on the first
+  // frame the idle face is actually up.
+  if (m.hero && m.screen == Screen::Ready && happy_arm_ && face_morph_ == 0) {
+    happy_until_ = face_frame_ + kHappyFrames;
+    happy_arm_ = false;
+  }
+  m.face_happy = m.hero && happy_until_ != 0 && face_frame_ < happy_until_;
   if (confuse_arm_ && m.hero && m.screen == Screen::Ready) {
     confused_until_ = face_frame_ + kConfusedFrames;
     confuse_arm_ = false;
   }
-  if (m.screen != Screen::Responding) surprised_until_ = 0;
+  if (m.screen != Screen::Responding && m.screen != Screen::Ready) surprised_until_ = 0;
   publish_face(m);
   if (!display_sleeping_) render(m);
 }
 
 void App::step_face(const UiModel& m) {
-  const bool thinking = m.screen == Screen::Thinking && status_.empty();
-  if (thinking && m.hero) {
+  const bool conversation = m.screen == Screen::Thinking || m.screen == Screen::Responding ||
+                            m.screen == Screen::Ready || m.screen == Screen::Listening;
+  const bool thinking = m.screen == Screen::Thinking && status_.empty() && m.hero;
+  if (thinking) {
     face_morph_ = std::min<uint8_t>(100, static_cast<uint8_t>(face_morph_ + 6));
-  } else if (face_morph_ > 0) {
-    if (m.screen == Screen::Responding && surprised_until_ == 0)
+  } else if (face_morph_ > 0 && conversation) {
+    // Morph back on the face. Snapping to 0 here is the hard cut into the dots'
+    // finished pose, and out of it when the reply arrives.
+    if ((m.screen == Screen::Responding || m.screen == Screen::Ready) && surprised_until_ == 0)
       surprised_until_ = face_frame_ + 17 + kSurpriseFrames;
     face_morph_ = face_morph_ > 6 ? static_cast<uint8_t>(face_morph_ - 6) : 0;
+  } else if (!conversation) {
+    face_morph_ = 0;
   }
-  if (!m.hero && mode_ != Mode::Thinking) face_morph_ = 0;
 
   bool want_sleep = false;
   const bool idle_face = m.hero && face_morph_ == 0 && !m.face_happy;
@@ -1811,14 +1844,17 @@ void App::step_face(const UiModel& m) {
 }
 
 void App::publish_face(UiModel& m) {
-  if (!m.hero && mode_ != Mode::Thinking) face_morph_ = 0;
+  const bool conversation = m.screen == Screen::Thinking || m.screen == Screen::Responding ||
+                            m.screen == Screen::Ready || m.screen == Screen::Listening;
+  if (!conversation) face_morph_ = 0;
   const bool busy = m.screen == Screen::Thinking && !status_.empty();
   face_busy_ = busy;
   face_reaction_ = 0;
   if (m.hero && m.screen == Screen::Ready && !m.face_happy && !face_asleep_ && face_wake_ == 100 && face_morph_ == 0 &&
       confused_until_ != 0 && face_frame_ < confused_until_) {
     face_reaction_ = 8;
-  } else if (m.hero && m.screen == Screen::Responding && surprised_until_ != 0 && face_frame_ < surprised_until_) {
+  } else if (m.hero && !m.face_happy && surprised_until_ != 0 && face_frame_ < surprised_until_ &&
+             (m.screen == Screen::Responding || m.screen == Screen::Ready)) {
     face_reaction_ = 6;
   } else if (busy) {
     face_reaction_ = contains_ci(status_, "search") ? 7 : 1;

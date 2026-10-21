@@ -163,6 +163,50 @@ TEST("face: speaking changes every frame; a settled idle face does not") {
   CHECK(stable);
 }
 
+TEST("face: the gradient dither breaks vertical bands and leaves the pupil exact") {
+  struct Panel : hg::Display {
+    std::vector<uint16_t> fb = std::vector<uint16_t>(180 * 180, 0);
+    hg::DisplayInfo info() const override {
+      hg::DisplayInfo d;
+      d.width = d.height = 180;
+      return d;
+    }
+    uint16_t* framebuffer() override { return fb.data(); }
+    void flush(uint16_t, uint16_t) override {}
+  } panel;
+  hg::Canvas canvas(panel.framebuffer(), 180, 180, false);
+  hg::face::draw(canvas, 90, 90, 150, hg::Screen::Ready, false, 10, 0, 0);
+  const uint16_t eye = hg::rgb565(hg::face::kEyeR, hg::face::kEyeG, hg::face::kEyeB);
+  CHECK(count_color(panel.fb, eye) > 40);
+
+  // Down the middle of the disc, away from the eyes. A flat RGB565 run here is
+  // the concentric band the panel showed.
+  int distinct = 0, run = 1, longest = 1;
+  uint16_t prev = 0;
+  bool any = false;
+  for (int y = 40; y < 140; ++y) {
+    const uint16_t p = panel.fb[static_cast<size_t>(y * 180 + 90)];
+    if (!blue_dominant(p)) continue;
+    if (!any) {
+      prev = p;
+      any = true;
+      distinct = 1;
+      continue;
+    }
+    if (p == prev) {
+      ++run;
+      if (run > longest) longest = run;
+    } else {
+      ++distinct;
+      run = 1;
+      prev = p;
+    }
+  }
+  CHECK(any);
+  CHECK(distinct >= 8);
+  CHECK(longest <= 8);
+}
+
 TEST("face: happy eyes are short and nearly level") {
   const auto s = hg::face::sample(0, hg::face::Mood::Happy, 0, 0, false);
   CHECK(s.left.h < s.left.w / 2);
