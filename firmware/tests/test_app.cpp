@@ -31,6 +31,8 @@ struct FakeHal : hg::Display, hg::AudioIn, hg::AudioOut, hg::Transport, hg::Stor
   }
   std::vector<std::string> logs;
   void log(hg::LogLevel, std::string_view message) override { logs.emplace_back(message); }
+  int restarts = 0;
+  void restart() override { ++restarts; }
 
   // Transport
   std::string url;
@@ -80,12 +82,14 @@ struct FakeHal : hg::Display, hg::AudioIn, hg::AudioOut, hg::Transport, hg::Stor
   std::vector<uint16_t> fb = std::vector<uint16_t>(320 * 240, 0);
   int flushes = 0;
   int flushed_rows = 0;
+  int last_rows = 0;
   hg::DisplayInfo info() const override {
     hg::DisplayInfo d;
     d.width = static_cast<uint16_t>(width);
     d.height = static_cast<uint16_t>(height);
     d.round = round;
     d.emissive = emissive;
+    d.corner_inset = corner_inset;
     d.has_backlight = backlight;
     return d;
   }
@@ -95,6 +99,7 @@ struct FakeHal : hg::Display, hg::AudioIn, hg::AudioOut, hg::Transport, hg::Stor
     fb.assign(static_cast<size_t>(diameter * diameter), 0);
   }
   uint16_t* framebuffer() override { return fb.data(); }
+  uint8_t corner_inset = 0;
   bool lit_while_dozing = false;  // the screen was turned on before the port woke
   void set_backlight(uint8_t percent) override {
     brightness = percent;
@@ -102,13 +107,16 @@ struct FakeHal : hg::Display, hg::AudioIn, hg::AudioOut, hg::Transport, hg::Stor
   }
   void flush(uint16_t y0, uint16_t y1) override {
     ++flushes;
+    last_rows = y1 - y0;
     flushed_rows += y1 - y0;
   }
 
   // Mic
   bool mic_on = false;
+  float gain_db = -1.f;
   bool start(uint32_t) override { return mic_on = true; }
   void stop() override { mic_on = false; }
+  void set_gain_db(float db) override { gain_db = db; }
 
   // Speaker
   bool spk_open = false;
@@ -307,7 +315,8 @@ TEST("app: push-to-talk streams audio and shows the reply") {
   CHECK_EQ(int(f.stream), stream);
   size_t samples = 0;
   for (auto& b : r.fake.sent_binary) samples += (b.size() - hg::proto::kBinaryHeader) / 2;
-  CHECK_EQ(samples, size_t(9600));
+  // The first 200 ms (3200 samples at 16 kHz) is the press, and is not uploaded.
+  CHECK_EQ(samples, size_t(6400));
 
   r.app.on_button(hg::Button::Talk, false);
   CHECK(!r.fake.mic_on);
@@ -391,7 +400,8 @@ TEST("app: microphone frames the link refused are counted when the recording end
   r.app.on_button(hg::Button::Talk, false);
   CHECK(r.fake.last("audio.end") != nullptr);
   bool counted = false;
-  for (const auto& l : r.fake.logs) counted |= l.find("recording: 3 of 10 audio frames not sent") != std::string::npos;
+  // Five of the ten blocks fall in the 200 ms trim, so only the later five are frames.
+  for (const auto& l : r.fake.logs) counted |= l.find("recording: 2 of 5 audio frames not sent") != std::string::npos;
   CHECK(counted);
 
   // The next recording starts from zero and, with every frame sent, logs nothing.
@@ -466,6 +476,64 @@ TEST("app: tap mode hears speech at the board's microphone level") {
   CHECK(d.fake.last("audio.cancel") != nullptr);
 }
 
+int upload_peak(const std::vector<std::vector<uint8_t>>& frames) {
+  int peak = 0;
+  for (const auto& b : frames) {
+    hg::proto::BinaryFrame f;
+    if (!hg::proto::parse_binary(b.data(), b.size(), f)) continue;
+    for (size_t i = 0; i + 1 < f.payload_len; i += 2) {
+      const int16_t s = static_cast<int16_t>(f.payload[i] | (static_cast<uint16_t>(f.payload[i + 1]) << 8));
+      const int a = s < 0 ? -static_cast<int>(s) : static_cast<int>(s);
+      if (a > peak) peak = a;
+    }
+  }
+  return peak;
+}
+
+TEST("app: a recording drops the opening click and raises a quiet voice") {
+  auto take = [](Rig& r, int boost) {
+    CHECK(r.app.console("set mic_boost " + std::to_string(boost)).find("@ok") == 0);
+    r.app.on_button(hg::Button::Talk, true);
+    std::vector<int16_t> click(3200, 20000);  // 200 ms at 16 kHz, full of the press
+    std::vector<int16_t> voice(3200);
+    for (size_t i = 0; i < voice.size(); ++i) voice[i] = (i & 16) ? -400 : 400;
+    r.app.on_mic_samples(click.data(), click.size());
+    r.app.on_mic_samples(voice.data(), voice.size());
+    size_t samples = 0;
+    for (const auto& b : r.fake.sent_binary) samples += (b.size() - hg::proto::kBinaryHeader) / 2;
+    const int peak = upload_peak(r.fake.sent_binary);
+    r.app.on_button(hg::Button::Talk, false);
+    CHECK_EQ(samples, size_t(3200));
+    return peak;
+  };
+  Rig raised;
+  raised.bring_online(true);
+  const int loud = take(raised, 30);
+  CHECK(loud > 10000);
+  CHECK(loud < 20000);
+  Rig plain;
+  plain.bring_online(true);
+  const int raw = take(plain, 0);
+  CHECK(raw > 250);
+  CHECK(raw < 600);
+}
+
+TEST("app: mic_gain is saved and applied to the codec") {
+  Rig r;
+  r.bring_online(true);
+  CHECK(r.fake.gain_db == 24.f);
+  CHECK_EQ(r.app.console("set mic_gain 37"), std::string("@ok mic_gain"));
+  CHECK(r.fake.gain_db == 37.f);
+  CHECK_EQ(r.fake.kv["mic_gain"], std::string("37"));
+  CHECK_EQ(r.app.console("set mic_gain 99"), std::string("@error mic_gain must be 0..42 dB"));
+  CHECK_EQ(r.fake.kv["mic_gain"], std::string("37"));
+  CHECK_EQ(r.app.console("set mic_boost 40"), std::string("@error mic_boost must be 0..36 dB"));
+  CHECK_EQ(r.app.console("set mic_gain"), std::string("@ok mic_gain"));
+  CHECK(r.fake.gain_db == 24.f);
+  CHECK(r.app.console("help").find("mic_gain") != std::string::npos);
+  CHECK(r.app.console("help").find("mic_boost") != std::string::npos);
+}
+
 TEST("app: a short tap is discarded instead of sent") {
   Rig r;
   r.bring_online(true);
@@ -536,6 +604,77 @@ TEST("app: lost connections retry with backoff") {
   CHECK_EQ(r.fake.connects, before);
   r.advance(1000);
   CHECK_EQ(r.fake.connects, before + 1);
+}
+
+namespace {
+
+// The in-flight connect never opens. Stops on the timeout, before the next try.
+void timeout_current(Rig& r) {
+  const int closes = r.fake.closes;
+  const int connects = r.fake.connects;
+  for (int k = 0; k < 200 && r.fake.closes == closes; ++k) r.advance(100);
+  CHECK(r.fake.closes > closes);
+  CHECK_EQ(r.fake.connects, connects);
+}
+
+void wait_connect(Rig& r) {
+  const int before = r.fake.connects;
+  for (int k = 0; k < 800 && r.fake.connects == before; ++k) r.advance(100);
+  CHECK_EQ(r.fake.connects, before + 1);
+}
+
+}  // namespace
+
+TEST("app: a server drop retries the socket without rejoining Wi-Fi") {
+  Rig r;
+  int rejoins = 0;
+  r.app.on_rejoin_wifi = [&] { ++rejoins; return true; };
+  r.bring_online(true);
+  r.app.on_transport_closed("server restarted");
+  r.advance(2000);
+  CHECK_EQ(rejoins, 0);
+  CHECK_EQ(r.fake.restarts, 0);
+  CHECK(r.fake.connects > 1);
+}
+
+TEST("app: connect timeouts rejoin Wi-Fi, then restart") {
+  Rig r;
+  int rejoins = 0;
+  r.app.on_rejoin_wifi = [&] { ++rejoins; return true; };
+  r.app.begin();
+  r.app.on_network(true, "lan");
+  wait_connect(r);
+  timeout_current(r);
+  wait_connect(r);
+  timeout_current(r);
+  CHECK_EQ(rejoins, 0);
+  CHECK_EQ(r.fake.restarts, 0);
+  wait_connect(r);
+  timeout_current(r);  // third: drop the station
+  CHECK_EQ(rejoins, 1);
+  CHECK_EQ(r.fake.restarts, 0);
+  for (int i = 0; i < 3; ++i) {
+    wait_connect(r);
+    timeout_current(r);
+  }
+  CHECK_EQ(rejoins, 1);
+  CHECK_EQ(r.fake.restarts, 1);
+  CHECK(r.app.console("diag").find("connect timeout") != std::string::npos);
+}
+
+TEST("app: reconnect rejoins Wi-Fi before it opens another socket") {
+  Rig r;
+  int rejoins = 0;
+  r.app.on_rejoin_wifi = [&] { ++rejoins; return true; };
+  r.bring_online(true);
+  const int connects = r.fake.connects;
+  CHECK_EQ(r.app.console("reconnect"), std::string("@ok reconnect"));
+  CHECK_EQ(rejoins, 1);
+  CHECK_EQ(r.fake.connects, connects);
+  r.advance(4000);
+  CHECK_EQ(r.fake.connects, connects);
+  r.advance(2000);
+  CHECK(r.fake.connects > connects);
 }
 
 TEST("app: a silent server is detected by the heartbeat timeout") {
@@ -777,7 +916,7 @@ TEST("app: sensor readings are reported, rate limited") {
   CHECK(r.fake.last("state") != nullptr);
 }
 
-TEST("app: the mascot fills idle, listening and thinking screens") {
+TEST("app: the face fills idle, listening and thinking screens") {
   Rig r;
   r.bring_online(true);
   CHECK(r.app.model().hero);  // idle
@@ -786,20 +925,25 @@ TEST("app: the mascot fills idle, listening and thinking screens") {
   r.advance(500);
   r.app.on_button(hg::Button::Talk, false);
   CHECK(r.app.screen() == hg::Screen::Thinking && r.app.model().hero);
-  // Audio before text: the mascot speaks; text arrives: the reply takes the screen.
+  // Audio before text: the face keeps speaking when the words arrive. The text
+  // screen waits until playback, the morph and a successful smile are done.
   r.server(R"({"type":"audio.start","stream":2,"rate":16000,"format":"pcm16"})");
   CHECK(r.app.screen() == hg::Screen::Responding && r.app.model().hero);
   r.server(R"({"type":"reply","text":"Done."})");
-  CHECK(!r.app.model().hero);
+  CHECK(r.app.screen() == hg::Screen::Responding && r.app.model().hero);
 }
 
-TEST("app: a finished reply stays readable, then the mascot returns; UP brings it back") {
+TEST("app: a finished reply smiles, then stays readable; UP brings it back") {
   Rig r;
   r.bring_online(true);
   r.server(R"({"type":"turn.start","turn":"t"})");
   r.server(R"({"type":"reply","turn":"t","text":"Here is the answer."})");
   r.server(R"({"type":"turn.end","turn":"t","outcome":"success"})");
   r.advance(200);
+  CHECK(r.app.screen() == hg::Screen::Ready);
+  CHECK(r.app.model().hero);  // the smile plays before the Ready text
+  CHECK(r.app.model().face_happy);
+  r.advance(4000);  // the smile is about 3 s, then the reply is readable
   CHECK(r.app.screen() == hg::Screen::Ready);
   CHECK(!r.app.model().hero);
   CHECK_EQ(r.app.model().body, std::string("Here is the answer."));
@@ -810,17 +954,111 @@ TEST("app: a finished reply stays readable, then the mascot returns; UP brings i
   CHECK_EQ(r.app.model().body, std::string("Here is the answer."));
 }
 
-TEST("app: hero animation redraws only a slice of the screen") {
+TEST("app: hero animation redraws the face, not the whole screen") {
   Rig r;
   r.bring_online(true);
   r.advance(200);
   int flushes = r.fake.flushes, rows = r.fake.flushed_rows;
-  r.advance(6000);  // at least one blink cycle, nothing else changing
+  r.advance(6000);  // blinks, glances and the idle reactions
   flushes = r.fake.flushes - flushes;
   rows = r.fake.flushed_rows - rows;
   CHECK(flushes > 0);
-  // Each blink flushes only the eye rows (~25 of the 196-row mascot area).
-  CHECK(rows / flushes < 60);
+  // A settled blink flushes the eye box, not the silhouette or the caption.
+  const int band = rows / flushes;
+  CHECK(band >= 10);
+  CHECK(band < r.fake.height / 2);
+
+  r.app.on_button(hg::Button::Talk, true);
+  r.advance(400);
+  r.app.on_button(hg::Button::Talk, false);
+  r.server(R"({"type":"transcript","text":"hello"})");
+  int wide = 0;
+  for (int i = 0; i < 40; ++i) {
+    r.fake.clock += 10;
+    r.app.tick();
+    if (r.fake.last_rows > wide) wide = r.fake.last_rows;
+  }
+  CHECK(r.app.screen() == hg::Screen::Thinking);
+  CHECK(wide > band + 20);  // the morph still redraws the silhouette
+}
+
+bool blue_dominant_px(uint16_t p) {
+  const int r = (p >> 11) & 31;
+  const int g = (p >> 5) & 63;
+  const int b = p & 31;
+  return b >= 12 && b > r && g > r;
+}
+
+TEST("app: idle, listening and thinking ticks change the framebuffer") {
+  Rig r;
+  r.bring_online(true);
+  const std::vector<uint16_t> idle = r.fake.fb;
+  const int flushes = r.fake.flushes;
+  r.advance(2500);  // a blink and a glance land inside this window
+  CHECK(r.fake.flushes > flushes);
+  CHECK(r.fake.fb != idle);
+
+  r.app.on_button(hg::Button::Talk, true);
+  r.advance(400);  // past the minimum utterance, so release sends
+  const std::vector<uint16_t> quiet = r.fake.fb;
+  int16_t loud[160];
+  for (int i = 0; i < 160; ++i) loud[i] = 20000;
+  r.app.on_mic_samples(loud, 160);
+  r.advance(120);
+  CHECK(r.app.screen() == hg::Screen::Listening);
+  CHECK(r.fake.fb != quiet);
+
+  r.app.on_button(hg::Button::Talk, false);
+  r.server(R"({"type":"transcript","text":"hello"})");  // drops "Sending..." so the dots morph
+  r.advance(40);
+  const std::vector<uint16_t> early = r.fake.fb;
+  const int morph = r.app.model().face_morph;
+  r.advance(400);
+  CHECK(r.app.screen() == hg::Screen::Thinking);
+  CHECK(r.app.model().face_morph > morph);
+  CHECK(r.fake.fb != early);
+}
+
+TEST("app: on the 410x486 watch the caption clears the body and ONLINE clears the corner") {
+  Rig r;
+  r.fake.width = 410;
+  r.fake.height = 486;
+  r.fake.emissive = true;
+  r.fake.corner_inset = 64;
+  r.fake.fb.assign(static_cast<size_t>(410 * 486), 0);
+  r.bring_online(true);
+  r.app.on_button(hg::Button::Talk, true);
+  CHECK(r.app.screen() == hg::Screen::Listening);
+
+  const uint16_t green = hg::rgb565(61, 214, 140);
+  const uint16_t dim = hg::rgb565(132, 146, 160);
+  // The headline is a run of the listening green. The disc is blue, and a
+  // dithered body pixel is not that flat green, so the two stay separable.
+  int caption_top = -1;
+  int status_right = 0;
+  for (int y = 0; y < 486; ++y) {
+    int run = 0;
+    for (int x = 0; x < 410; ++x) {
+      const uint16_t p = r.fake.fb[static_cast<size_t>(y * 410 + x)];
+      if (y >= 30 && p == green) {
+        if (++run >= 6 && caption_top < 0) caption_top = y;
+      } else {
+        run = 0;
+      }
+      if (y < 28 && (p == green || p == dim) && x > status_right) status_right = x;
+    }
+  }
+  int body_bottom = 0;
+  for (int y = 0; y < 486; ++y) {
+    for (int x = 100; x < 310; ++x) {
+      const uint16_t p = r.fake.fb[static_cast<size_t>(y * 410 + x)];
+      if (p != green && p != dim && blue_dominant_px(p) && y > body_bottom) body_bottom = y;
+    }
+  }
+  CHECK(body_bottom > 80);
+  CHECK(caption_top > body_bottom + 12);  // the listening lines are not on the disc
+  CHECK(status_right > 200);
+  CHECK(status_right <= 410 - 90);  // inside a ~100 px corner at the top of the bar
 }
 
 TEST("app: holding CANCEL starts a new session; a short press still cancels") {
@@ -869,7 +1107,7 @@ TEST("app: rendering is deterministic for the same model") {
   CHECK(a.fake.flushes > 0);
 }
 
-TEST("app: a question from Hermes shows the mascot with TALK/CANCEL answers") {
+TEST("app: a question from Hermes shows the face with TALK/CANCEL answers") {
   Rig r;
   r.bring_online(true);
   r.server(R"({"type":"turn.start","turn":"t"})");
@@ -939,7 +1177,7 @@ TEST("app: a question waits for a recording, and can be withdrawn or expire") {
   CHECK(r.app.console("no") == "@error no question to answer");
 }
 
-TEST("app: connection, pairing and setup screens show the mascot") {
+TEST("app: connection, pairing and setup screens show the face") {
   Rig r;
   r.app.begin();
   r.app.on_network(true, "wifi");
@@ -961,7 +1199,7 @@ TEST("app: connection, pairing and setup screens show the mascot") {
   CHECK(unset.app.screen() == hg::Screen::Error && unset.app.model().hero);
 }
 
-TEST("app: short cards sit under the mascot, long ones use the text layout") {
+TEST("app: short cards sit under the face, long ones use the text layout") {
   Rig r;
   r.bring_online(true);
   r.server(R"({"type":"display","title":"Timer","body":"Pasta: 9 min"})");
@@ -1002,7 +1240,7 @@ TEST("app: long replies page themselves; UP/DOWN pauses the paging") {
   CHECK_EQ(r.app.model().scroll, manual);  // paused after a manual scroll
   CHECK(!r.app.model().hero);              // and the reply is still on screen
 
-  // Paging stops at the last page, which stays readable before the mascot returns.
+  // Paging stops at the last page, which stays readable before the face returns.
   int last = -1;
   for (int i = 0; i < 40 && r.app.model().scroll != last; ++i) {
     last = r.app.model().scroll;
@@ -1763,7 +2001,7 @@ TEST("display: an emissive panel leaves its background unlit; a backlit one keep
     ui.render(m);
     const uint16_t corner = display.fb[0], centre_edge = display.fb[static_cast<size_t>(233 * 466 + 120)];
     CHECK_EQ(corner == 0, emissive);  // outside the UI square
-    CHECK_EQ(centre_edge == 0, emissive);  // inside it, beside the mascot
+    CHECK_EQ(centre_edge == 0, emissive);  // inside it, beside the face
   }
 }
 

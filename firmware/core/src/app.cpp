@@ -19,7 +19,7 @@ constexpr uint32_t kMinUtteranceMs = 350;
 constexpr uint32_t kMaxUtteranceMs = 30000;
 constexpr uint32_t kThinkingTimeoutMs = 180000;
 constexpr uint32_t kSettleAfterReplyMs = 6000;
-constexpr uint32_t kReplyLingerMs = 20000;    // reply text stays up this long before the mascot returns
+constexpr uint32_t kReplyLingerMs = 20000;    // reply text stays up this long before the face returns
 constexpr uint32_t kNewSessionHoldMs = 2000;  // hold CANCEL this long to start a new session
 constexpr uint32_t kNewSessionHintMs = 600;   // ...and show the countdown after this long
 constexpr uint32_t kPromptArmMs = 600;        // presses this soon after a question appears don't answer it
@@ -27,7 +27,35 @@ constexpr uint32_t kPageLineMs = 1000;        // long text: reading time per lin
 constexpr uint32_t kManualScrollPauseMs = 15000;  // UP/DOWN pauses automatic paging this long
 constexpr uint8_t kCaptionLines = 3;          // detail lines on pairing, setup and card screens
 constexpr uint8_t kPromptLines = 4;           // ...and on a question (the renderer drops lines on small screens)
+bool contains_ci(const std::string& s, const char* needle) {
+  const size_t n = std::strlen(needle);
+  if (n == 0 || s.size() < n) return false;
+  for (size_t i = 0; i + n <= s.size(); ++i) {
+    bool ok = true;
+    for (size_t j = 0; j < n; ++j) {
+      char a = s[i + j];
+      if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+      if (a != needle[j]) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return true;
+  }
+  return false;
+}
+
 constexpr uint32_t kFrameMs = 100;
+constexpr uint32_t kFaceFrameMs = 33;  // ~30 fps while a hero face is on screen
+constexpr uint32_t kHappyFrames = 90;  // ~3 s, inside the app's 2.5–4.5 s happy hold
+constexpr uint32_t kFaceSleepReady = 750;    // ~25 s of idle before the body collapses
+constexpr uint32_t kFaceSleepOffline = 200;  // ~6.6 s offline before the same collapse
+constexpr uint32_t kConfusedFrames = 90;     // ~3 s, inside the app's 2.2–3.8 s confused hold
+constexpr uint32_t kSurpriseFrames = 18;     // a short beat, then the speaker moves the eyes
+constexpr uint32_t kShapeStart = 900;        // leave the first moments a plain circle
+constexpr uint32_t kReactionStart = 36;
+constexpr uint32_t kReactionRest = 90;  // ~3 s of the idle pose
+constexpr uint32_t kReactionHold = 36;  // ~1.2 s, the app's onboarding cadence
 constexpr uint32_t kSensorIntervalMs = 2000;
 constexpr uint32_t kDefaultCardMs = 15000;
 constexpr int kDashboardVersion = 1;    // the dashboard message this firmware draws
@@ -36,10 +64,9 @@ constexpr size_t kMicChunkSamples = 640;  // 40 ms at 16 kHz per binary frame
 constexpr size_t kOtaAckBytes = 16 * 1024;  // a firmware update acknowledges every 16 KB written
 constexpr uint32_t kOtaIdleMs = 30000;      // ...and is abandoned when no data comes for this long
 constexpr uint32_t kOtaRestartMs = 1000;    // time for ota.done to leave before the restart
-constexpr uint32_t kBackoffMs[] = {1000, 2000, 4000, 8000, 15000, 30000};
-constexpr size_t kBackoffSteps = sizeof(kBackoffMs) / sizeof(kBackoffMs[0]);
+constexpr uint32_t kRejoinWaitMs = 5000;    // a station rejoin that never drops the link
 
-const char* const kSettingKeys[] = {"name", "server", "token", "talk_mode", "volume", "brightness", "screen_timeout", "battery_display", "battery_estimate", "wifi_ssid", "wifi_pass"};
+const char* const kSettingKeys[] = {"name", "server", "token", "talk_mode", "volume", "mic_gain", "mic_boost", "brightness", "screen_timeout", "battery_display", "battery_estimate", "wifi_ssid", "wifi_pass"};
 
 // NVS limits storage keys to 15 characters; keep the public setting name unchanged.
 std::string_view setting_storage_key(std::string_view key) {
@@ -118,6 +145,14 @@ void App::load_settings() {
                        : indicator == "percentage" ? BatteryIndicator::Percentage
                        : indicator == "both" ? BatteryIndicator::Both : BatteryIndicator::Off;
   battery_estimate_enabled_ = setting("battery_estimate", "off") == "liion";
+  const std::string gain = setting("mic_gain");
+  mic_gain_db_ = gain.empty() ? profile_.mic_gain_db
+                              : static_cast<float>(std::max(0, std::min(MicCapture::kPgaDbMax, std::atoi(gain.c_str()))));
+  if (hal_.mic) hal_.mic->set_gain_db(mic_gain_db_);
+  const std::string boost = setting("mic_boost");
+  int boost_db = boost.empty() ? MicCapture::kDefaultBoostDb : std::atoi(boost.c_str());
+  mic_boost_db_ = std::max(0, std::min(MicCapture::kBoostDbMax, boost_db));
+  mic_capture_.set_boost_db(mic_boost_db_);
   activity_at_ = now();
   display_dimmed_ = display_sleeping_ = false;
 }
@@ -222,6 +257,7 @@ void App::on_network(bool up, std::string_view detail) {
   network_up_ = up;
   network_detail_ = std::string(detail);
   if (!up) {
+    rejoin_wait_until_ = 0;
     if (phase_ == Phase::Connecting || phase_ == Phase::Handshake || phase_ == Phase::Online) {
       hal_.transport->close();
       drop_session("network lost");
@@ -240,6 +276,7 @@ void App::on_network(bool up, std::string_view detail) {
 
 void App::connect_now() {
   reconnect_pending_ = false;
+  rejoin_wait_until_ = 0;
   if (server_url_.empty()) {
     fatal_ = "No Hermes server configured";
     phase_ = Phase::NoNetwork;
@@ -256,15 +293,20 @@ void App::connect_now() {
   update_model();
 }
 
-void App::schedule_reconnect() {
-  if (online_since_ && now() - online_since_ >= kStableSessionMs) backoff_ = 0;
-  uint32_t delay = kBackoffMs[std::min<size_t>(static_cast<size_t>(backoff_), kBackoffSteps - 1)];
-  if (backoff_ < static_cast<int>(kBackoffSteps) - 1) ++backoff_;
-  reconnect_at_ = now() + delay;
-  reconnect_pending_ = network_up_;
+uint8_t App::jitter_byte() const {
+  uint8_t b = 0;
+  if (hal_.system) hal_.system->random_bytes(&b, 1);
+  return b;
 }
 
-void App::drop_session(std::string_view reason) {
+void App::arm_reconnect(uint32_t delay_ms, bool hold_for_wifi) {
+  reconnect_at_ = now() + delay_ms;
+  if (!reconnect_at_) reconnect_at_ = 1;  // 0 would look like "nothing scheduled" after a wrap
+  reconnect_pending_ = network_up_ && !hold_for_wifi;
+  rejoin_wait_until_ = hold_for_wifi ? now() + kRejoinWaitMs : 0;
+}
+
+void App::drop_session(std::string_view reason, bool connect_failed) {
   last_close_ = std::string(reason);
   if (ota_busy()) {
     if (ota_ == Ota::Receiving) hal_.updater->abort();
@@ -281,14 +323,32 @@ void App::drop_session(std::string_view reason) {
   dash_rows_.clear();
   clear_prompt();
   transport_active_ = false;
-  schedule_reconnect();
+  if (online_since_ && now() - online_since_ >= kStableSessionMs) link_.on_settled();
   online_since_ = 0;
+  bool hold = false;
+  uint32_t delay = 0;
+  if (connect_failed) {
+    const LinkRecover::Decision decision = link_.on_connect_timeout(jitter_byte());
+    delay = decision.wait_ms;
+    if (decision.action == LinkRecover::Action::Restart) {
+      log(LogLevel::Error, "Hermes connect kept timing out; restarting");
+      if (!ota_busy()) hal_.system->restart();
+    } else if (decision.action == LinkRecover::Action::RejoinWifi) {
+      log(LogLevel::Warn, "Hermes connect timed out; rejoining Wi-Fi");
+      hold = on_rejoin_wifi && on_rejoin_wifi();
+    }
+  } else {
+    delay = link_.on_other_drop(jitter_byte());
+  }
+  arm_reconnect(delay, hold);
   phase_ = network_up_ ? Phase::Connecting : Phase::NoNetwork;
   phase_since_ = now();
 }
 
 void App::on_transport_open() {
   if (!transport_active_ || phase_ != Phase::Connecting) return;
+  link_.on_opened();
+  rejoin_wait_until_ = 0;
   phase_ = Phase::Handshake;
   phase_since_ = now();
   last_rx_ = now();
@@ -296,11 +356,21 @@ void App::on_transport_open() {
   update_model();
 }
 
+void App::on_transport_armed() {
+  // The port waited out the previous client's destroy before this open, so the
+  // 10 s connect budget starts now. An open that didn't wait never calls this.
+  if (transport_active_ && phase_ == Phase::Connecting) phase_since_ = now();
+}
+
 void App::on_transport_closed(std::string_view reason) {
   // Closes we initiated (timeouts, reconfiguration) were already handled.
   if (!transport_active_) return;
   log(LogLevel::Warn, std::string("connection closed: ") + std::string(reason));
-  drop_session(reason);
+  // Tear the client down during the backoff, not at the next connect, so the
+  // TLS context and the cached lookup are gone before the retry asks for them.
+  const bool connect_failed = phase_ == Phase::Connecting;
+  hal_.transport->close();
+  drop_session(reason, connect_failed);
   update_model();
 }
 
@@ -472,6 +542,12 @@ void App::h_turn_start(const json::Value& m) {
     mode_since_ = now();
   }
   status_.clear();
+  happy_arm_ = false;
+  happy_until_ = 0;
+  reply_after_smile_ = false;
+  surprised_until_ = 0;
+  confused_until_ = 0;
+  confuse_arm_ = false;
 }
 
 void App::h_turn_end(const json::Value& m) {
@@ -482,6 +558,9 @@ void App::h_turn_end(const json::Value& m) {
   if (m["outcome"].as_string() == "failure" && reply_.empty()) {
     notice_ = "Hermes could not complete that request";
     notice_until_ = now() + 8000;
+    confuse_arm_ = true;
+  } else if (m["outcome"].as_string() == "success") {
+    happy_arm_ = true;
   }
   if (mode_ == Mode::Thinking) {
     mode_ = reply_.empty() ? Mode::Idle : Mode::Responding;
@@ -588,6 +667,10 @@ void App::on_transport_binary(const uint8_t* data, size_t len) {
     pcm_buf_.resize(n);
     std::memcpy(pcm_buf_.data(), f.payload, n * 2);  // payload may be unaligned
     hal_.speaker->write(pcm_buf_.data(), n);
+    if (n) {
+      voice_ = level_percent(rms(pcm_buf_.data(), n));
+      voice_at_ = now();
+    }
     return;
   }
   if (f.channel == proto::Channel::Image) {
@@ -782,7 +865,7 @@ void App::h_error(const json::Value& m) {
   if (code == "auth_failed" || code == "bad_token" || code == "protocol") {
     // Retrying immediately cannot help; surface it and back off hard.
     fatal_ = message.empty() ? code : message;
-    backoff_ = static_cast<int>(kBackoffSteps) - 1;
+    link_.on_hard_failure();
   } else {
     notice_ = message.empty() ? code : message;
     notice_until_ = now() + 8000;
@@ -906,6 +989,10 @@ void App::start_listening(bool hands_free) {
     return;
   }
   hands_free_ = hands_free;
+  // Nothing here plays a tone into the microphone. The press that starts a
+  // recording is a click in the first tenth of a second; the capture drops
+  // that and raises what follows before it is uploaded.
+  mic_capture_.reset(profile_.mic_rate, mic_boost_db_);
   mic_stream_ = static_cast<uint8_t>(mic_stream_ % 250 + 1);
   mic_seq_ = 0;
   mic_unsent_ = 0;
@@ -924,6 +1011,9 @@ void App::start_listening(bool hands_free) {
   send(start);
   mode_ = Mode::Listening;
   mode_since_ = now();
+  happy_arm_ = false;
+  happy_until_ = 0;
+  reply_after_smile_ = false;
   reply_.clear();
   status_.clear();
   user_echo_.clear();
@@ -985,6 +1075,7 @@ void App::cancel_turn() {
   send(proto::message("cancel"));
   mode_ = Mode::Idle;
   mode_since_ = now();
+  reply_after_smile_ = false;
   set_hint_flash("Cancelled");
 }
 
@@ -994,19 +1085,30 @@ void App::on_mic_samples(const int16_t* samples, size_t count) {
     update_model();
     return;
   }
-  if (mode_ != Mode::Listening || count == 0) return;
+  if (mode_ != Mode::Listening || count == 0 || samples == nullptr) return;
+  // The eyes follow the microphone itself. The upload is trimmed and raised,
+  // which would pin the meter if it were metered after the gain.
   level_ = level_percent(rms(samples, count));
+  mic_pcm_.assign(samples, samples + count);
+  const size_t kept = mic_capture_.shape(mic_pcm_.data(), mic_pcm_.size());
+  if (kept == 0) return;
+  // Tap mode judges the trimmed, filtered block before the upload gain, so a
+  // pause stays under the board's floor and the opening click never counts.
+  Vad::Result verdict = Vad::Result::Continue;
+  const bool judge = hands_free_;
+  if (judge) verdict = vad_.feed(mic_pcm_.data(), kept);
+  mic_capture_.normalise(mic_pcm_.data(), kept);
   size_t off = 0;
-  while (off < count) {
-    size_t n = std::min(kMicChunkSamples, count - off);
+  while (off < kept) {
+    size_t n = std::min(kMicChunkSamples, kept - off);
     frame_buf_.resize(proto::kBinaryHeader + n * 2);
     proto::write_binary_header(frame_buf_.data(), proto::Channel::Audio, mic_stream_, mic_seq_++);
-    std::memcpy(frame_buf_.data() + proto::kBinaryHeader, samples + off, n * 2);
+    std::memcpy(frame_buf_.data() + proto::kBinaryHeader, mic_pcm_.data() + off, n * 2);
     if (!hal_.transport->send_binary(frame_buf_.data(), frame_buf_.size())) ++mic_unsent_;
     off += n;
   }
-  if (hands_free_) {
-    Vad::Result r = vad_.feed(samples, count);
+  if (judge) {
+    Vad::Result r = verdict;
     if (r == Vad::Result::EndOfSpeech) {
       finish_listening();
       update_model();
@@ -1351,11 +1453,23 @@ void App::tick() {
     update_model();
   }
 
+  if (rejoin_wait_until_ && static_cast<int32_t>(t - rejoin_wait_until_) >= 0) {
+    // The station never reported the drop. Try the socket anyway.
+    rejoin_wait_until_ = 0;
+    if (network_up_ && !transport_active_) {
+      reconnect_pending_ = true;
+      reconnect_at_ = t;
+    }
+  }
+
   if (reconnect_pending_ && network_up_ && static_cast<int32_t>(t - reconnect_at_) >= 0) connect_now();
 
-  if (phase_ == Phase::Connecting && !reconnect_pending_ && t - phase_since_ > kConnectTimeoutMs) {
+  // transport_active_, not merely "phase is connecting": the backoff and a
+  // station rejoin also sit in Connecting, and must not count as another timeout.
+  if (phase_ == Phase::Connecting && transport_active_ && t - phase_since_ > kConnectTimeoutMs) {
+    log(LogLevel::Warn, "connect timeout");
     hal_.transport->close();
-    drop_session("connect timeout");
+    drop_session("connect timeout", true);
     update_model();
   } else if (phase_ == Phase::Handshake && t - phase_since_ > kHandshakeTimeoutMs) {
     hal_.transport->close();
@@ -1388,12 +1502,17 @@ void App::tick() {
     notice_until_ = t + 8000;
     update_model();
   }
-  if (mode_ == Mode::Responding && !speaking()) {
+  if (mode_ == Mode::Responding && !speaking() && face_morph_ == 0) {
     bool settled = turn_done_ || (reply_final_ && t - last_turn_rx_ > kSettleAfterReplyMs);
     if (settled) {
       mode_ = Mode::Idle;
       mode_since_ = t;
-      reply_until_ = t + kReplyLingerMs;
+      // The smile plays on the face first. The Ready text starts when it ends,
+      // so the 20 s linger is reading time and not the smile.
+      if (!reply_.empty() && (happy_arm_ || (happy_until_ != 0 && face_frame_ < happy_until_)))
+        reply_after_smile_ = true;
+      else if (!reply_.empty())
+        reply_until_ = t + kReplyLingerMs;
       update_model();
     }
   }
@@ -1440,15 +1559,39 @@ void App::tick() {
   flush_display_state();
   perf_tick();
 
+  bool stepped = false;
   if (t - frame_at_ >= kFrameMs) {
     frame_at_ = t;
     ++model_.frame;
-    update_model();
+    stepped = true;
   }
+  // The face runs faster than the other screens, and only while it is actually
+  // showing. A dark screen keeps the slower clock.
+  if (!display_sleeping_ && model_.hero && t - face_at_ >= kFaceFrameMs) {
+    face_at_ = t;
+    ++face_frame_;
+    if (voice_ && t - voice_at_ >= kFaceFrameMs) {
+      voice_ = voice_ > 12 ? static_cast<uint8_t>(voice_ - 12) : 0;
+      voice_at_ = t;
+    }
+    if (happy_until_ && face_frame_ >= happy_until_) {
+      happy_until_ = 0;
+      if (reply_after_smile_) {
+        reply_after_smile_ = false;
+        if (!reply_.empty()) reply_until_ = t + kReplyLingerMs;
+      }
+    }
+    face_stepped_ = true;
+    stepped = true;
+  }
+  if (stepped) update_model();
 }
 
 void App::update_model() {
   UiModel& m = model_;
+  m.face_frame = face_frame_;
+  m.voice = voice_;
+  m.face_happy = false;
   m.title = name_;
   m.code.clear();
   m.detail.clear();
@@ -1613,7 +1756,7 @@ void App::update_model() {
     m.screen = Screen::Card;
     m.headline = card_title_.empty() ? "Hermes" : card_title_;
     m.hint = profile_.cancel_label + " to close";
-    // A short card is a caption under the mascot; a long one gets the text layout and pages.
+    // A short card is a caption under the face; a long one gets the text layout and pages.
     m.hero = !ui_ || static_cast<int>(wrap_text(card_body_, ui_->layout().hero_cols).size()) <= kCaptionLines;
     if (m.hero) {
       m.caption_lines = kCaptionLines;
@@ -1625,7 +1768,9 @@ void App::update_model() {
   } else if (mode_ == Mode::Thinking) {
     m.screen = Screen::Thinking;
     m.hero = true;
-    m.headline = "Thinking";
+    if (!status_.empty() && contains_ci(status_, "search")) m.headline = "Searching";
+    else if (!status_.empty()) m.headline = "Working";
+    else m.headline = "Thinking";
     // The live status phrase when Hermes sends one, else what speech-to-text heard.
     m.detail = status_;
     if (!user_echo_.empty()) {
@@ -1639,8 +1784,9 @@ void App::update_model() {
     m.detail = status_;
     m.body = reply_;
     m.hint = profile_.touch_screen ? "Hold to reply" : talk + " to reply";
-    // Spoken audio can start before the text arrives: let the mascot talk meanwhile.
-    m.hero = reply_.empty();
+    // The face keeps talking while audio plays, and while the body is still
+    // morphing out of the three dots. Reply text replaces it only after that.
+    m.hero = reply_.empty() || m.speaking || face_morph_ > 0;
   } else {
     m.screen = Screen::Ready;
     m.headline = "Ready";
@@ -1662,7 +1808,144 @@ void App::update_model() {
       *power_status_->battery_percent <= 10 && power_status_->external_power == false)
     m.detail = "Low battery: connect USB";
   if (!hint_flash_.empty()) m.hint = hint_flash_;
+  // step_face reads this for the idle-sleep timer. The smile may arm just below,
+  // after the morph for this tick is known.
+  m.face_happy = m.hero && happy_until_ != 0 && face_frame_ < happy_until_;
+  if (face_stepped_) {
+    face_stepped_ = false;
+    step_face(m);
+  }
+  // A morph still on screen, or a smile that has not played yet, keeps the
+  // face up. Otherwise turn.end drops straight onto the Ready text.
+  if (face_morph_ > 0 &&
+      (m.screen == Screen::Thinking || m.screen == Screen::Responding || m.screen == Screen::Ready))
+    m.hero = true;
+  if (happy_arm_ && !reply_.empty() && face_morph_ == 0 &&
+      (m.screen == Screen::Responding || m.screen == Screen::Ready)) {
+    m.hero = true;
+    m.body.clear();
+  }
+  // The smile starts once the dots have finished morphing back, on the first
+  // frame the idle face is actually up.
+  if (m.hero && m.screen == Screen::Ready && happy_arm_ && face_morph_ == 0) {
+    happy_until_ = face_frame_ + kHappyFrames;
+    happy_arm_ = false;
+  }
+  m.face_happy = m.hero && happy_until_ != 0 && face_frame_ < happy_until_;
+  if (confuse_arm_ && m.hero && m.screen == Screen::Ready) {
+    confused_until_ = face_frame_ + kConfusedFrames;
+    confuse_arm_ = false;
+  }
+  if (m.screen != Screen::Responding && m.screen != Screen::Ready) surprised_until_ = 0;
+  publish_face(m);
   if (!display_sleeping_) render(m);
+}
+
+void App::step_face(const UiModel& m) {
+  const bool conversation = m.screen == Screen::Thinking || m.screen == Screen::Responding ||
+                            m.screen == Screen::Ready || m.screen == Screen::Listening;
+  const bool thinking = m.screen == Screen::Thinking && status_.empty() && m.hero;
+  if (thinking) {
+    face_morph_ = std::min<uint8_t>(100, static_cast<uint8_t>(face_morph_ + 6));
+  } else if (face_morph_ > 0 && conversation) {
+    // Morph back on the face. Snapping to 0 here is the hard cut into the dots'
+    // finished pose, and out of it when the reply arrives.
+    if ((m.screen == Screen::Responding || m.screen == Screen::Ready) && surprised_until_ == 0)
+      surprised_until_ = face_frame_ + 17 + kSurpriseFrames;
+    face_morph_ = face_morph_ > 6 ? static_cast<uint8_t>(face_morph_ - 6) : 0;
+  } else if (!conversation) {
+    face_morph_ = 0;
+  }
+
+  bool want_sleep = false;
+  const bool idle_face = m.hero && face_morph_ == 0 && !m.face_happy;
+  if (idle_face && m.screen == Screen::Ready && mode_ == Mode::Idle) {
+    if (!idle_mark_valid_) {
+      idle_mark_ = face_frame_;
+      idle_mark_valid_ = true;
+    }
+    if (face_frame_ - idle_mark_ >= kFaceSleepReady) want_sleep = true;
+  } else if (idle_face && m.screen == Screen::Offline) {
+    if (!idle_mark_valid_) {
+      idle_mark_ = face_frame_;
+      idle_mark_valid_ = true;
+    }
+    if (face_frame_ - idle_mark_ >= kFaceSleepOffline) want_sleep = true;
+  } else {
+    idle_mark_valid_ = false;
+  }
+  if (display_dimmed_ && m.hero && (m.screen == Screen::Ready || m.screen == Screen::Offline)) want_sleep = true;
+
+  if (want_sleep) {
+    face_asleep_ = true;
+    face_wake_ = face_wake_ > 4 ? static_cast<uint8_t>(face_wake_ - 4) : 0;
+  } else if (face_wake_ < 100) {
+    face_wake_ = std::min<uint8_t>(100, static_cast<uint8_t>(face_wake_ + 4));
+    if (face_wake_ == 100) face_asleep_ = false;
+  } else {
+    face_asleep_ = false;
+  }
+
+  const bool wander = m.hero && m.screen == Screen::Ready && !m.face_happy && !face_asleep_ && face_wake_ == 100 &&
+                      face_morph_ == 0 && face_frame_ >= kShapeStart;
+  if (!wander) {
+    if (face_shape_k_ > 8) face_shape_k_ = static_cast<uint8_t>(face_shape_k_ - 8);
+    else face_shape_k_ = 0;
+    if (face_shape_k_ == 0) shape_phase_ = 0;
+  } else if (shape_phase_ == 0) {
+    shape_phase_ = 1;
+    face_shape_ = shape_next_;
+  } else if (shape_phase_ == 1) {
+    face_shape_k_ = std::min<uint8_t>(100, static_cast<uint8_t>(face_shape_k_ + 8));
+    if (face_shape_k_ == 100) {
+      shape_phase_ = 2;
+      shape_hold_ = face_frame_ + 140;
+    }
+  } else if (shape_phase_ == 2) {
+    if (face_frame_ >= shape_hold_) shape_phase_ = 3;
+  } else if (face_shape_k_ > 8) {
+    face_shape_k_ = static_cast<uint8_t>(face_shape_k_ - 8);
+  } else {
+    face_shape_k_ = 0;
+    shape_phase_ = 0;
+    shape_next_ = static_cast<uint8_t>(shape_next_ % 3 + 1);
+  }
+}
+
+void App::publish_face(UiModel& m) {
+  const bool conversation = m.screen == Screen::Thinking || m.screen == Screen::Responding ||
+                            m.screen == Screen::Ready || m.screen == Screen::Listening;
+  if (!conversation) face_morph_ = 0;
+  const bool busy = m.screen == Screen::Thinking && !status_.empty();
+  face_busy_ = busy;
+  face_reaction_ = 0;
+  if (m.hero && m.screen == Screen::Ready && !m.face_happy && !face_asleep_ && face_wake_ == 100 && face_morph_ == 0 &&
+      confused_until_ != 0 && face_frame_ < confused_until_) {
+    face_reaction_ = 8;
+  } else if (m.hero && !m.face_happy && surprised_until_ != 0 && face_frame_ < surprised_until_ &&
+             (m.screen == Screen::Responding || m.screen == Screen::Ready)) {
+    face_reaction_ = 6;
+  } else if (busy) {
+    face_reaction_ = contains_ci(status_, "search") ? 7 : 1;
+  } else if (m.hero && m.screen == Screen::Ready && !m.face_happy && !face_asleep_ && face_wake_ == 100 &&
+             face_morph_ == 0 && face_frame_ >= kReactionStart) {
+    const uint32_t t = face_frame_ - kReactionStart;
+    const uint32_t span = kReactionRest + kReactionHold;
+    if (t % span >= kReactionRest) face_reaction_ = static_cast<uint8_t>(1 + (t / span) % 7u);
+  }
+  m.face_morph = face_morph_;
+  m.face_wake = face_wake_;
+  m.face_asleep = face_asleep_;
+  m.face_reaction = face_reaction_;
+  m.face_busy = face_busy_;
+  m.face_swirl = m.screen == Screen::Connecting || m.screen == Screen::Updating;
+  if (m.screen == Screen::Updating) {
+    m.face_shape = 3;
+    m.face_shape_k = 100;
+  } else {
+    m.face_shape = face_shape_;
+    m.face_shape_k = face_shape_k_;
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -1795,6 +2078,14 @@ std::string App::console(std::string_view raw) {
       return "@error battery_display must be icon, percentage, both or off";
     if (key == "battery_estimate" && !value.empty() && value != "off" && value != "liion")
       return "@error battery_estimate must be off or liion";
+    if (key == "mic_gain" && !value.empty() &&
+        (value.size() > 2 || value.find_first_not_of("0123456789") != std::string::npos ||
+         std::atoi(value.c_str()) > MicCapture::kPgaDbMax))
+      return "@error mic_gain must be 0..42 dB";
+    if (key == "mic_boost" && !value.empty() &&
+        (value.size() > 2 || value.find_first_not_of("0123456789") != std::string::npos ||
+         std::atoi(value.c_str()) > MicCapture::kBoostDbMax))
+      return "@error mic_boost must be 0..36 dB";
     if (!hal_.storage) return "@error no storage";
     if (value.empty()) hal_.storage->erase(setting_storage_key(key));
     else if (!hal_.storage->set(setting_storage_key(key), value)) return "@error could not save " + key;
@@ -1811,9 +2102,10 @@ std::string App::console(std::string_view raw) {
         hal_.transport->close();
         drop_session("reconfigured");
       }
-      backoff_ = 0;
+      link_.reset();
+      rejoin_wait_until_ = 0;
       reconnect_pending_ = network_up_;
-      reconnect_at_ = now();
+      reconnect_at_ = now() ? now() : 1;
     }
     if (on_setting_changed) on_setting_changed(key);
     update_model();
@@ -1852,9 +2144,11 @@ std::string App::console(std::string_view raw) {
       hal_.transport->close();
       drop_session("manual reconnect");
     }
-    backoff_ = 0;
-    reconnect_pending_ = network_up_;
-    reconnect_at_ = now();
+    // The console command used to open another socket on the same association.
+    // That never recovered a station stuck on the router's old channel.
+    link_.on_manual();
+    const bool hold = on_rejoin_wifi && on_rejoin_wifi();
+    arm_reconnect(0, hold);
     update_model();
     return "@ok reconnect";
   }

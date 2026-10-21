@@ -123,6 +123,25 @@ TEST("wifi fast: forgetting the network drops the record") {
   CHECK(!f.forget());
 }
 
+TEST("wifi fast: abandoning the record scans even when no aimed attempt was running") {
+  hg::WifiFastJoin f;
+  f.load(home().encode());
+  f.abandon();
+  CHECK(f.aim("Home") == nullptr);
+  CHECK(!f.joined(home()));  // same record: nothing new to store, but the aim is trusted again
+  CHECK(f.aim("Home") != nullptr);
+}
+
+TEST("wifi fast: beacon loss and a channel move need a scan; a bad password does not") {
+  CHECK(hg::wifi_reason_needs_scan(200));  // beacon timeout
+  CHECK(hg::wifi_reason_needs_scan(201));  // no AP where we looked
+  CHECK(hg::wifi_reason_needs_scan(12));   // BSS transition
+  CHECK(hg::wifi_reason_needs_scan(11));   // unsupported channel
+  CHECK(!hg::wifi_reason_needs_scan(202));  // auth fail: same access point
+  CHECK(!hg::wifi_reason_needs_scan(1));
+  CHECK(!hg::wifi_reason_needs_scan(0));
+}
+
 TEST("wifi fast: an aimed attempt that never reports back counts as failed") {
   hg::WifiFastJoin f;
   f.load(home().encode());

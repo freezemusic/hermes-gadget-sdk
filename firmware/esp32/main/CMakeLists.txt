@@ -50,6 +50,7 @@ idf_component_register(
         esp_lcd_st7701
         esp_lcd_panel_io_additions
         esp_netif
+        lwip
         esp_http_server
         esp_psram
         esp_timer

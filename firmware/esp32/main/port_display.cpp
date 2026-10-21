@@ -87,8 +87,10 @@ bool SpiDisplay::begin(const LcdConfig& cfg, i2c_master_bus_handle_t i2c_bus) {
   const size_t px = static_cast<size_t>(cfg.width) * cfg.height;
   fb_ = static_cast<uint16_t*>(heap_caps_malloc(px * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   if (!fb_) fb_ = static_cast<uint16_t*>(heap_caps_malloc(px * 2, MALLOC_CAP_8BIT));
-  bounce_ = static_cast<uint16_t*>(heap_caps_malloc(static_cast<size_t>(cfg.width) * kBounceRows * 2, MALLOC_CAP_DMA));
-  if (!fb_ || !bounce_) {
+  const size_t bounce_bytes = static_cast<size_t>(cfg.width) * kBounceRows * 2;
+  bounce_[0] = static_cast<uint16_t*>(heap_caps_malloc(bounce_bytes, MALLOC_CAP_DMA));
+  bounce_[1] = static_cast<uint16_t*>(heap_caps_malloc(bounce_bytes, MALLOC_CAP_DMA));
+  if (!fb_ || !bounce_[0]) {
     ESP_LOGE(TAG, "not enough memory for a %ux%u framebuffer", cfg.width, cfg.height);
     return false;
   }
@@ -97,14 +99,18 @@ bool SpiDisplay::begin(const LcdConfig& cfg, i2c_master_bus_handle_t i2c_bus) {
   // A band takes about 2.6 ms on a 320-px panel at 40 MHz. Allow ten times the
   // band at the configured clock, and never less than 100 ms.
   const uint32_t band_ms = static_cast<uint32_t>(cfg.width) * kBounceRows * 16 / (std::max(1, cfg.spi_mhz) * 1000u) + 1;
+  const int slots = bounce_[1] ? 2 : 1;
   bands_.emplace(
-      cfg.height, kBounceRows, std::max<uint32_t>(100, 10 * band_ms),
-      [this](int y, int rows) {
+      cfg.height, kBounceRows, std::max<uint32_t>(100, 10 * band_ms), slots,
+      [this](int slot, int y, int rows) {
         const int w = cfg_.width;
-        std::memcpy(bounce_, fb_ + static_cast<size_t>(y) * w, static_cast<size_t>(rows) * w * 2);
-        return esp_lcd_panel_draw_bitmap(panel_, 0, y, w, y + rows, bounce_) == ESP_OK;
+        std::memcpy(bounce_[slot], fb_ + static_cast<size_t>(y) * w, static_cast<size_t>(rows) * w * 2);
       },
-      [this](uint32_t ms) { return xSemaphoreTake(done_, pdMS_TO_TICKS(ms)) == pdTRUE; });
+      [this](int slot, int y, int rows) {
+        const int w = cfg_.width;
+        return esp_lcd_panel_draw_bitmap(panel_, 0, y, w, y + rows, bounce_[slot]) == ESP_OK;
+      },
+      [this](uint32_t ms) { return wait_dma(done_, ms); });
 
   spi_bus_config_t bus = {};
   bus.mosi_io_num = cfg.mosi;

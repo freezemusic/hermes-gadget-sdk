@@ -15,6 +15,9 @@
 #include <string_view>
 
 #include "freertos/FreeRTOS.h"  // must precede every other FreeRTOS header
+#include "freertos/task.h"
+
+#include "hg/cooperate.hpp"
 
 #include "board.hpp"
 #include "axp2101.hpp"
@@ -55,8 +58,8 @@ namespace hgp {
 // ---------------------------------------------------------------------------
 // Events
 
-enum class EventType : uint8_t { NetUp, NetDown, WsOpen, WsText, WsBinary, WsClosed, Mic, Console, Touch, Key,
-                                 WifiStarted, WifiDisconnected, WifiProvision, WifiScanDone, Encoder, Phone };
+enum class EventType : uint8_t { NetUp, NetDown, WsOpen, WsText, WsBinary, WsClosed, WsArm, Mic, Console, Touch, Key,
+                                 WifiStarted, WifiDisconnected, WifiBeaconTimeout, WifiProvision, WifiScanDone, Encoder, Phone };
 
 // Payload of Phone events (posted by the Bluetooth host task).
 struct PhoneSample {
@@ -120,6 +123,7 @@ class EspSystem final : public hg::System {
   uint64_t now_us() override;
   void random_bytes(uint8_t* out, size_t len) override;
   void log(hg::LogLevel level, std::string_view message) override;
+  void restart() override;
   // Boards with BoardConfig::light_sleep: keeps the chip out of light sleep
   // except while dozing. Call before power management enables light sleep.
   bool enable_doze();
@@ -152,6 +156,8 @@ class WsTransport final : public hg::Transport {
   bool send_text(std::string_view text) override;
   bool send_binary(const uint8_t* data, size_t len) override;
   void close() override;
+  // The previous client has been destroyed. Opens the one connect() asked for.
+  void arm();
   uint32_t generation() const { return gens_.current(); }
   // True once if the current connection was lost. Backs up the WsClosed event,
   // which the client may post from the app task itself while the queue is full.
@@ -165,10 +171,13 @@ class WsTransport final : public hg::Transport {
   // Sends run on their own task, so a slow or dead link never stalls the app
   // task (and with it the screen): send_*() only queue a copy.
   static void tx_task(void* arg);
+  void retire_current();
+  void open_client();
   bool enqueue(uint8_t opcode, const void* data, size_t len);
   esp_websocket_client_handle_t client_ = nullptr;
   QueueHandle_t tx_ = nullptr;
   hg::ws::Generations gens_;
+  hg::ws::ClientSlot slot_;
   hg::ws::TxWatch watch_;
   std::atomic<bool> handoff_failed_{false};
   std::string url_, subprotocol_;
@@ -220,7 +229,7 @@ class SpiDisplay final : public hg::Display {
   esp_lcd_panel_io_handle_t io_ = nullptr;
   esp_lcd_panel_handle_t panel_ = nullptr;
   uint16_t* fb_ = nullptr;
-  uint16_t* bounce_ = nullptr;  // DMA-capable staging rows
+  uint16_t* bounce_[2] = {nullptr, nullptr};  // DMA-capable staging rows
   SemaphoreHandle_t done_ = nullptr;
   std::optional<hg::BandFlush> bands_;
 };
@@ -285,7 +294,7 @@ class ParallelDisplay final : public hg::Display {
   esp_lcd_panel_io_handle_t io_ = nullptr;
   esp_lcd_panel_handle_t panel_ = nullptr;
   uint16_t* fb_ = nullptr;
-  uint16_t* bounce_ = nullptr;  // DMA-capable staging rows
+  uint16_t* bounce_[2] = {nullptr, nullptr};  // DMA-capable staging rows
   int bounce_rows_ = 0;
   uint8_t backlight_level_ = 0;
   SemaphoreHandle_t done_ = nullptr;
@@ -309,7 +318,7 @@ class AmoledDisplay final : public hg::Display {
   AmoledConfig cfg_{};
   esp_lcd_panel_io_handle_t io_ = nullptr;
   uint16_t* fb_ = nullptr;
-  uint16_t* bounce_ = nullptr;
+  uint16_t* bounce_[2] = {nullptr, nullptr};
   SemaphoreHandle_t done_ = nullptr;
   std::optional<hg::BandFlush> bands_;
   bool panel_on_ = true;
@@ -329,6 +338,22 @@ inline bool gpio_isr_service() {
 inline bool esp_ok(esp_err_t err, const char* tag, const char* what) {
   if (err == ESP_OK) return true;
   ESP_LOGE(tag, "%s failed: %s", what, esp_err_to_name(err));
+  return false;
+}
+
+// Waits for one DMA completion, sampling buttons between ticks so a long flush
+// does not hold the debounce counters still. timeout 0 is a poll.
+inline bool wait_dma(SemaphoreHandle_t done, uint32_t timeout_ms) {
+  if (timeout_ms == 0) return xSemaphoreTake(done, 0) == pdTRUE;
+  TickType_t left = pdMS_TO_TICKS(timeout_ms);
+  if (left < 1) left = 1;
+  while (left > 0) {
+    hg::cooperate();
+    const TickType_t slice = left > 1 ? 1 : left;
+    if (xSemaphoreTake(done, slice) == pdTRUE) return true;
+    if (slice >= left) break;
+    left -= slice;
+  }
   return false;
 }
 
@@ -391,6 +416,7 @@ class CodecMic final : public hg::AudioIn {
   bool begin(esp_codec_dev_handle_t dev, bool rmnm, const CodecAudio::MicLink& link);
   bool start(uint32_t sample_rate) override;
   void stop() override { capturing_ = false; }
+  void set_gain_db(float db) override;
 
  private:
   static void task(void* arg);
@@ -531,6 +557,8 @@ class Buttons {
  public:
   void begin(const ButtonConfig& cfg);
   void poll(hg::App& app);  // call every ~10 ms from the app task
+  // Advance debounce without calling into the app. Safe from a long paint.
+  void sample();
 
  private:
   struct Button {
@@ -539,7 +567,14 @@ class Buttons {
     bool pressed = false;
     uint8_t stable = 0;
   };
+  struct Edge {
+    hg::Button id = hg::Button::Talk;
+    bool down = false;
+  };
   Button buttons_[4];
+  Edge pending_[8];
+  uint8_t pending_n_ = 0;
+  TickType_t sampled_at_ = 0xFFFFFFFFu;
 };
 
 // Over-the-air updates into the other app slot of partitions.csv. A new image
@@ -587,7 +622,13 @@ class Wifi {
   void scan_done();
   // The network the device is on, or empty.
   std::string current() const { return link_up_ ? ssid_ : std::string(); }
-  void disconnected();
+  void disconnected(int reason);
+  // Beacons stopped while the station still looked joined (the router moved
+  // channel and the station didn't follow). Drops the association and scans.
+  void on_beacon_timeout();
+  // Hermes asked for a fresh association (connect timeouts, or `reconnect`).
+  // False while a phone setup is trying its own network.
+  bool rejoin_station();
   void connected(hg::App& app);
   void tick(hg::App& app, uint32_t now);
   // Retry at once instead of at the next backoff slot (the user is back).
@@ -616,7 +657,8 @@ class Wifi {
   hg::WifiNetworks networks_;
   hg::WifiPick pick_;
   hg::WifiFastJoin fast_;
-  bool aimed_ = false;      // the station config names one access point (fast_)
+  bool aimed_ = false;       // the station config names one access point (fast_)
+  bool force_scan_ = false;  // the next disconnect joins without the saved channel
   bool static_ip_ = false;  // DHCP stopped for a reused lease (CONFIG_HG_WIFI_REUSE_IP)
   std::string ssid_, password_;  // what the station is configured for
   bool link_up_ = false, scanning_ = false;

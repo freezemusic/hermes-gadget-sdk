@@ -230,7 +230,9 @@ TEST("frame stats: perf on measures the app's frames, inputs and logs a summary"
   }
   app.on_button(hg::Button::Up, true);
   app.on_button(hg::Button::Up, false);
-  for (int i = 0; i < 40; ++i) {
+  // The face blinks at most 6 s apart (one face frame per 100 ms tick here),
+  // and that blink is what flushes the eye band and closes the input timer.
+  for (int i = 0; i < 200; ++i) {
     dev.clock_ms += 100;
     app.tick();
   }

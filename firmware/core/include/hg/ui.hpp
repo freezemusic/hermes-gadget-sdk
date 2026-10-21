@@ -14,7 +14,6 @@
 #include "hg/canvas.hpp"
 #include "hg/frame_stats.hpp"
 #include "hg/hal.hpp"
-#include "hg/mascot.hpp"
 #include "hg/qr.hpp"
 
 namespace hg {
@@ -72,9 +71,27 @@ struct UiModel {
   bool battery_charging = false;
   bool battery_low = false;
   uint32_t frame = 0;    // animation frame, advanced by the app
+  // Face clock, advanced only while a hero face is on screen (~30 fps).
+  // voice is the speaker level 0..100. face_happy holds the smile after a
+  // successful turn. Rendering reads these and never a clock.
+  uint32_t face_frame = 0;
+  uint8_t voice = 0;
+  bool face_happy = false;
+  // Body style. morph 0 = the disc, 100 = three dots. shape 0 circle, 1 pebble,
+  // 2 squircle, 3 triangle; shape_k blends toward it. wake 0 = one dot, 100 = full.
+  // reaction 0 keeps the screen pose; see docs/faces.md. busy keeps the body up
+  // while a working-status phrase is showing. swirl draws the loading rings.
+  uint8_t face_morph = 0;
+  uint8_t face_shape = 0;
+  uint8_t face_shape_k = 0;
+  uint8_t face_wake = 100;
+  uint8_t face_reaction = 0;
+  bool face_asleep = false;
+  bool face_busy = false;
+  bool face_swirl = false;
   std::string hint;      // bottom bar
   std::string yes, no;   // answer buttons under the hero caption (Prompt screen)
-  // Show the mascot as large as fits, with headline/detail as a caption,
+  // Show the face as large as fits, with headline/detail as a caption,
   // instead of the header + text layout.
   bool hero = false;
   uint8_t caption_lines = 1;  // hero: lines the detail may wrap to (then "..")
@@ -140,7 +157,7 @@ class Ui {
   int battery_width(const UiModel& m) const;
   void draw_round_battery(const UiModel& m);
   struct HeroGeom {
-    int size = 0, x = 0, y = 0;  // mascot
+    int size = 0, x = 0, y = 0;  // face disc
     int caption_y = 0, buttons_y = 0;
     std::vector<std::string> detail;  // wrapped, already truncated
   };

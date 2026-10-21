@@ -120,6 +120,13 @@ class WifiFastJoin {
     trying_ = cached_ && !spent_ && cached_->ssid == ssid;
     return trying_ ? &*cached_ : nullptr;
   }
+  // The record's channel is stale (beacon timeout, the router moved, or the
+  // station is being dropped on purpose). The next aim() joins normally until
+  // a join writes a new record, even when no aimed attempt was in flight.
+  void abandon() {
+    trying_ = false;
+    spent_ = true;
+  }
   // The attempt failed. True when it was the aimed one: the caller then joins
   // normally, and need not count it against the network.
   bool failed() {
@@ -149,5 +156,24 @@ class WifiFastJoin {
   std::optional<WifiFastAp> cached_;
   bool trying_ = false, spent_ = false;
 };
+
+// esp_wifi_types.h wifi_err_reason_t, kept as numbers so a host test can name
+// them. True when the access point is no longer where the fast-join record
+// says, so the next join has to scan. A bad password (auth fail, 202) is not
+// one of these: the same access point is still the one to try.
+inline bool wifi_reason_needs_scan(int reason) {
+  switch (reason) {
+    case 11:   // WIFI_REASON_DISASSOC_SUPCHAN_BAD
+    case 12:   // WIFI_REASON_BSS_TRANSITION_DISASSOC
+    case 200:  // WIFI_REASON_BEACON_TIMEOUT
+    case 201:  // WIFI_REASON_NO_AP_FOUND
+    case 210:  // WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY
+    case 211:  // WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD
+    case 212:  // WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD
+      return true;
+    default:
+      return false;
+  }
+}
 
 }  // namespace hg

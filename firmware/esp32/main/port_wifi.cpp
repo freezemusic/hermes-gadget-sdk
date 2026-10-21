@@ -38,6 +38,10 @@ void Wifi::begin(NvsStorage& storage) {
   if (esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "hg-wifi-join", &attempt_lock_) != ESP_OK) attempt_lock_ = nullptr;
 #endif
   ESP_ERROR_CHECK(esp_wifi_start());
+  // A router that changes channel without the station following goes quiet.
+  // Missed beacons are reported (WIFI_EVENT_STA_BEACON_TIMEOUT) instead of an
+  // association that still looks joined and still has its old address.
+  if (esp_wifi_set_inactive_time(WIFI_IF_STA, 6) != ESP_OK) ESP_LOGW("hg.wifi", "couldn't set the beacon timeout");
 }
 
 void Wifi::hold_while_attempting() {
@@ -168,11 +172,19 @@ void Wifi::networks_changed() {
   else reconfigure();
 }
 
-void Wifi::disconnected() {
+void Wifi::disconnected(int reason) {
   wait_disconnect_ = false;
   link_up_ = false;
+  const bool scan = force_scan_ || hg::wifi_reason_needs_scan(reason);
+  force_scan_ = false;
+  if (scan) fast_.abandon();
   if (configured_) {
-    if (fast_.failed()) {
+    if (scan) {
+      // The access point moved, or Hermes asked for a new association. Aiming
+      // at the saved channel would miss it and sit there until that attempt timed out.
+      retry_.lost(now_ms(), false);
+      retry_.retry_now(now_ms());
+    } else if (fast_.failed()) {
       // The fast join didn't work: join normally at once, without counting it against
       // the network or lengthening the battery backoff.
       retry_.lost(now_ms(), false);
@@ -183,6 +195,33 @@ void Wifi::disconnected() {
     }
   }
   hold_while_attempting();
+}
+
+void Wifi::on_beacon_timeout() {
+  // Only while the driver still calls the station joined. A later disconnect
+  // event carries the same news, and a rejoin is already under way.
+  if (!configured_ || !link_up_ || joining_ || force_scan_) return;
+  ESP_LOGW("hg.wifi", "beacon timeout; rejoining and scanning");
+  rejoin_station();
+}
+
+bool Wifi::rejoin_station() {
+  if (!configured_ || joining_) return false;
+  if (scanning_) {
+    esp_wifi_scan_stop();
+    scanning_ = false;
+  }
+  force_scan_ = true;
+  fast_.abandon();
+  const esp_err_t err = esp_wifi_disconnect();
+  if (err != ESP_OK) {
+    // Already down: no disconnect event is coming, so join from here.
+    ESP_LOGW("hg.wifi", "rejoin: %s", esp_err_to_name(err));
+    force_scan_ = false;
+    retry_.lost(now_ms(), false);
+    retry_.retry_now(now_ms());
+  }
+  return true;
 }
 
 void Wifi::connected(hg::App& app) {
@@ -307,6 +346,8 @@ void Wifi::on_event(void*, const char* base, int32_t id, void* data) {
     char detail[48];
     std::snprintf(detail, sizeof(detail), "Wi-Fi lost (reason %d)", info ? info->reason : 0);
     events::post(EventType::WifiDisconnected, detail, std::strlen(detail));
+  } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_BEACON_TIMEOUT) {
+    events::post(EventType::WifiBeaconTimeout);
   } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
     const auto* got = static_cast<ip_event_got_ip_t*>(data);
     char detail[32];

@@ -5,6 +5,7 @@
 #include <cstring>
 #include <vector>
 
+#include "hg/face.hpp"
 #include "hg/font.hpp"
 
 namespace hg {
@@ -22,8 +23,6 @@ constexpr uint16_t kBlue = rgb565(90, 169, 242);
 constexpr uint16_t kRed = rgb565(242, 95, 92);
 constexpr uint16_t kYellow = rgb565(242, 201, 76);
 constexpr uint16_t kGreenDim = rgb565(28, 92, 62);
-constexpr uint16_t kBlueDim = rgb565(52, 96, 140);
-constexpr uint16_t kAccentDim = rgb565(110, 82, 30);
 constexpr uint16_t kRedDim = rgb565(122, 44, 44);
 
 class Hash {
@@ -81,27 +80,38 @@ int tri(uint32_t frame, int period) {
   return p < period / 2 ? p : period - p;
 }
 
-mascot::Frame mascot_frame(const UiModel& m) {
-  if (m.screen == Screen::Responding && m.speaking) {
-    return (m.frame / 2) % 2 ? mascot::Frame::Talk : mascot::Frame::Idle;
-  }
-  return m.frame % 45 < 2 ? mascot::Frame::Blink : mascot::Frame::Idle;  // blink every ~4.5 s
+// Everything that changes hero pixels between frames, and nothing else, so a
+// settled face does not flush. The disc colour follows the screen and is part
+// of the static key, not this one.
+face::Style face_style(const UiModel& m) {
+  face::Style s;
+  s.morph = m.face_morph;
+  s.shape = m.face_shape;
+  s.shape_k = m.face_shape_k;
+  s.wake = m.face_wake;
+  s.reaction = m.face_reaction;
+  s.asleep = m.face_asleep;
+  s.swirl = m.face_swirl;
+  s.busy = m.face_busy;
+  return s;
 }
 
-// Everything that changes hero pixels between frames, and nothing else, so
-// a still mascot never triggers a redraw.
-uint32_t hero_anim_key(const UiModel& m) {
-  Hash h;
-  h.val(mascot_frame(m));
-  switch (m.screen) {
-    case Screen::Listening: h.val(m.frame % 3).val(m.level / 20); break;
-    case Screen::Thinking:
-    case Screen::Connecting:
-    case Screen::Updating: h.val((m.frame / 2) % 4); break;
-    case Screen::Responding: h.val((m.frame / 2) % 3); break;
-    default: break;
-  }
-  return h.get();
+uint32_t hero_anim_key(const UiModel& m, int diameter) {
+  const face::Style style = face_style(m);
+  return face::picture_key(m.face_frame, face::mood_for(m.screen, m.face_happy, m.face_reaction, m.face_busy), m.level,
+                           m.voice, face::dots_for(m.screen, m.face_busy), diameter, style);
+}
+
+// True while the face can change pixels from one face tick to the next.
+// A finished sleep dot and the error mark stay still; everything else blinks,
+// glances, breathes, pulses or is mid-morph, and has to be flushed.
+bool face_live(const UiModel& m) {
+  const face::Style s = face_style(m);
+  if (s.swirl || s.wake < 100 || s.morph > 0) return true;
+  if (s.shape_k > 0 && s.shape_k < 100) return true;
+  const face::Mood mood = face::mood_for(m.screen, m.face_happy, m.face_reaction, m.face_busy);
+  if (mood == face::Mood::Alert || mood == face::Mood::Sleep || mood == face::Mood::Sleepy) return false;
+  return true;
 }
 
 uint16_t tone_color(DashRow::Tone t) {
@@ -185,7 +195,7 @@ Ui::Ui(Display& display)
   layout_.body_cols = cols_for(w - 2 * margin, s);
   layout_.body_rows = std::max(1, (content_h - margin) / Canvas::line_height(s));
 
-  // Hero layout: the mascot is sized per screen (see hero_geom).
+  // Hero layout: the face is sized per screen (see hero_geom).
   layout_.hero_cols = cols_for(w - 4 * s, s);
 }
 
@@ -273,7 +283,7 @@ void Ui::draw_frame(const UiModel& m) {
   hashes[3] = Hash().add(m.hint).get();
 
   if (m.hero) {
-    // Hero mode: top bar, one mascot band, bottom bar.
+    // Hero mode: top bar, one face band, bottom bar.
     for (int i : {0, 3}) {
       if (valid_ && hash_[i] == hashes[i]) continue;
       int y0 = i == 0 ? 0 : y_bottom, y1 = i == 0 ? y_header : h;
@@ -284,17 +294,46 @@ void Ui::draw_frame(const UiModel& m) {
       hash_[i] = hashes[i];
     }
     uint32_t stat = Hash().val(m.screen).add(m.headline).add(m.detail).add(m.yes).add(m.no).val(m.caption_lines).get();
-    uint32_t anim = hero_anim_key(m);
+    const HeroGeom geom = hero_geom(m);
+    const int face_d = geom.size;
+    uint32_t anim = hero_anim_key(m, face_d);
     int y0 = y_header, y1 = y_bottom;
-    bool redraw = !valid_ || !hero_valid_ || stat != hero_static_;
-    if (!redraw && anim != hero_anim_) {
-      hero_anim_rows(m, y0, y1);  // only what can move
-      redraw = true;
-    }
-    if (redraw) {
-      c.set_clip_rows(y0, y1);
-      draw_hero(c, m);
-      flush(y0, y1);
+    // A caption or screen change clears the whole hero area. A settled face
+    // (blink, glance, breath, microphone, speaker) blits the cached body over
+    // the union of the previous and current eye box and flushes only those
+    // rows. Morphing, a shape blend, the sleep collapse and the swirl still
+    // redraw the whole silhouette. Gating the flush on a picture key left the
+    // watch on the last full paint (frames stayed at 0).
+    const bool full = !valid_ || !hero_valid_ || stat != hero_static_;
+    const bool moved = anim != hero_anim_ || face_live(m);
+    const face::Style style = face_style(m);
+    const int cx = geom.x + geom.size / 2;
+    const int cy = geom.y + geom.size / 2;
+    const bool settled = !full && !face::anim_wide(style) &&
+                         face::body_cached(cx, cy, geom.size, m.screen, bg_, style, c.width(), c.swapped());
+    if (full || moved) {
+      if (settled) {
+        face::Box cur = face::overlay_box(cx, cy, geom.size, m.screen, m.face_happy, m.face_frame, m.level, m.voice, style);
+        face::Box dirty = face::unite(face::last_overlay(), cur);
+        if (dirty.any) {
+          dirty.x0 -= 2;
+          dirty.y0 -= 2;
+          dirty.x1 += 2;
+          dirty.y1 += 2;
+        }
+        y0 = std::max(dirty.y0, y_header);
+        y1 = std::min(dirty.y1, y_bottom);
+        if (y1 < y0) y1 = y0;
+        c.set_clip_rows(y0, y1);
+        face::blit_body(c, dirty, bg_);
+        face::draw_overlay(c, cx, cy, geom.size, m.screen, m.face_happy, m.face_frame, m.level, m.voice, style);
+        flush(y0, y1);
+      } else {
+        if (!full) hero_anim_rows(m, y0, y1);
+        c.set_clip_rows(y0, y1);
+        draw_hero(c, m);
+        flush(y0, y1);
+      }
     }
     hero_static_ = stat;
     hero_anim_ = anim;
@@ -355,8 +394,13 @@ void Ui::draw_top(Canvas& c, const UiModel& m) {
     return;
   }
   const int pad = 3 * s + panel_.corner_inset;
+  // The link cluster is the rightmost ink. On a ~100 px corner the arc at the
+  // top of the bar still covers a plain `corner_inset`, so the cluster steps
+  // further left than the title. Square panels (inset 0) are unchanged.
+  const int right_pad = pad + panel_.corner_inset / 2;
   int label_w = Canvas::text_width(label, s);
-  int label_x = w - pad - label_w;
+  int label_x = w - right_pad - label_w;
+  ty = std::max(s, (layout_.top_h - font::kGlyphHeight * s) / 2);
   c.text(label_x, ty, label, s, kDim);
   int r = std::max(2, 3 * s / 2 + 1);
   const int dot_x = label_x - 3 * s - r;
@@ -705,61 +749,51 @@ Ui::HeroGeom Ui::hero_geom(const UiModel& m) const {
   if (!m.detail.empty()) g.detail = wrap_text(m.detail, cols);
   const int buttons_h = m.yes.empty() && m.no.empty() ? 0 : lh + 6 * s;
   auto caption_h = [&](int lines) { return (1 + lines) * lh + s; };
-  // Never shrink the mascot below the smallest bitmap: drop caption lines instead.
-  const int smallest = mascot::pick(0, mascot::Frame::Idle)->size;
+  // Drop caption lines before the face gets too small to read.
+  constexpr int kSmallestFace = 48;
   int max_lines = std::max(1, static_cast<int>(m.caption_lines));
-  while (max_lines > 1 && layout_.main_h - caption_h(max_lines) - buttons_h - 4 * s < smallest) --max_lines;
+  while (max_lines > 1 && layout_.main_h - caption_h(max_lines) - buttons_h - 4 * s < kSmallestFace) --max_lines;
   if (static_cast<int>(g.detail.size()) > max_lines) {
     g.detail.resize(static_cast<size_t>(max_lines));
     std::string& last = g.detail.back();
     if (static_cast<int>(last.size()) + 2 > cols) last.resize(static_cast<size_t>(std::max(0, cols - 2)));
     last += "..";
   }
-  // Reserve one detail line even when there is none, so the mascot keeps its size.
+  // Reserve one detail line even when there is none, so the face keeps its size.
   const int ch = caption_h(std::max<int>(1, static_cast<int>(g.detail.size())));
-  const int avail = std::min(w - 8 * s, layout_.main_h - ch - buttons_h - 4 * s);
-  g.size = mascot::pick(avail, mascot::Frame::Idle)->size;
-  const int block = g.size + 2 * s + ch + buttons_h;
+  const int gap = lh;  // one clear text line under the silhouette, above the caption
+  // Rings reach 74% of the diameter from the centre, which is 24% past the
+  // disc. The caption starts below that, or it is drawn across the body.
+  constexpr int kOverhangPct = 24;
+  const int room = layout_.main_h - ch - buttons_h - gap - 4 * s;
+  const int max_by_h = std::max(16, room > 0 ? room * 100 / (100 + kOverhangPct) : 16);
+  const int max_by_w = std::max(16, (w - 8 * s) * 66 / 100);
+  g.size = std::min(max_by_h, max_by_w);
+  const int overhang = std::max(s, g.size * kOverhangPct / 100);
+  const int block = g.size + overhang + gap + ch + buttons_h;
   g.x = (w - g.size) / 2;
   g.y = layout_.main_y + std::max(s, (layout_.main_h - block) / 2);
-  g.caption_y = g.y + g.size + 2 * s;
+  g.caption_y = g.y + g.size + overhang + gap;
   g.buttons_y = g.caption_y + ch + 2 * s;
   return g;
 }
 
 void Ui::hero_anim_rows(const UiModel& m, int& y0, int& y1) const {
   const HeroGeom g = hero_geom(m);
-  const int size = g.size, my = g.y;
-  const mascot::Anchors& a = mascot::anchors();
-  int top = my + size * a.eyes_y0 / 1000, bottom = my + size * a.eyes_y1 / 1000;
-  auto add = [&](int lo, int hi) {
-    top = std::min(top, lo);
-    bottom = std::max(bottom, hi);
-  };
-  const int reach = size * 280 / 1000;  // outermost wave radius + stroke
-  switch (m.screen) {
-    case Screen::Listening: {
-      int ey = my + size * a.ear_cup.y / 1000;
-      add(ey - reach, ey + reach);
-      break;
-    }
-    case Screen::Responding: {
-      int mouth = my + size * a.mouth.y / 1000;
-      add(my + size * a.mouth_y0 / 1000, my + size * a.mouth_y1 / 1000);
-      add(mouth - reach, mouth + reach);
-      break;
-    }
-    case Screen::Thinking:
-    case Screen::Connecting:
-    case Screen::Updating: {
-      int ty = my + size * a.head_top_right.y / 1000;
-      add(ty - size / 6, ty + size / 12);
-      break;
-    }
-    default: break;
-  }
-  y0 = std::max(top - 1, layout_.top_h);
+  const int s = layout_.scale;
+  const int lh = Canvas::line_height(s);
+  int top = 0, bottom = 0;
+  // Disc, rings, dots, the bang and the morph all sit inside the wide rect.
+  // The caption is in the same flush so a later tick cannot leave the line
+  // painted across the body.
+  face::anim_rows(g.y + g.size / 2, g.size, top, bottom, true, 0);
+  const int lines = 1 + static_cast<int>(g.detail.size());
+  bottom = std::max(bottom, g.caption_y + lines * lh + s);
+  if (!m.yes.empty() || !m.no.empty()) bottom = std::max(bottom, g.buttons_y + lh + 4 * s);
+  if (g.y < top) top = g.y;
+  y0 = std::max(top - 2, layout_.top_h);
   y1 = std::min(bottom + 2, static_cast<int>(info_.height) - layout_.bottom_h);
+  if (y1 < y0) y1 = y0;
 }
 
 void Ui::draw_hero(Canvas& c, const UiModel& m) {
@@ -771,48 +805,8 @@ void Ui::draw_hero(Canvas& c, const UiModel& m) {
   c.fill_rect(0, y0, w, y1 - y0, bg_);
 
   const HeroGeom g = hero_geom(m);
-  const int size = g.size, mx = g.x, my = g.y;
-  const mascot::Anchors& a = mascot::anchors();
-  if (const mascot::Bitmap* b = mascot::pick(size, mascot_frame(m))) {
-    c.bitmap1(mx, my, b->size, b->size, b->bits, kText);
-  }
-  const int stroke = std::max(2, size / 48);
-  auto waves = [&](int cx, int cy, int dir, int lit, int phase, uint16_t on, uint16_t dim, int r0) {
-    for (int i = 0; i < 3; ++i) {
-      int r = size * (r0 + 60 * i) / 1000;
-      uint16_t col = i >= lit ? kFaint : (i == phase ? on : dim);
-      c.arc(cx, cy, r, stroke, dir, col);
-    }
-  };
-  auto dots = [&](uint16_t on, uint16_t dim) {
-    int r = std::max(2, size / 30);
-    int gap = 3 * r;
-    int tx = mx + size * a.head_top_right.x / 1000;
-    int ty = my + size * a.head_top_right.y / 1000;
-    int active = static_cast<int>((m.frame / 2) % 4);
-    for (int i = 0; i < 3; ++i) {
-      c.fill_circle(tx + i * gap, ty - i * gap / 2, r, i == active ? on : dim);
-    }
-  };
-  switch (m.screen) {
-    case Screen::Listening: {
-      int lit = 1 + std::min(2, m.level / 34);
-      waves(mx + size * a.ear_cup.x / 1000, my + size * a.ear_cup.y / 1000, +1, lit,
-            static_cast<int>(m.frame % 3), kGreen, kGreenDim, 90);
-      break;
-    }
-    case Screen::Responding:
-      if (m.speaking) {
-        // Start outside the face outline so the waves read as sound, not as lines on her cheek.
-        waves(mx + size * a.mouth.x / 1000, my + size * a.mouth.y / 1000, -1, 3,
-              static_cast<int>((m.frame / 2) % 3), kAccent, kAccentDim, 130);
-      }
-      break;
-    case Screen::Thinking: dots(kBlue, kBlueDim); break;
-    case Screen::Connecting:
-    case Screen::Updating: dots(kAccent, kAccentDim); break;
-    default: break;
-  }
+  face::draw(c, g.x + g.size / 2, g.y + g.size / 2, g.size, m.screen, m.face_happy, m.face_frame, m.level, m.voice,
+             face_style(m), bg_);
 
   // Caption: headline, then the detail lines, centred.
   const int cols = layout_.hero_cols;

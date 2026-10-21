@@ -23,10 +23,15 @@ void Buttons::begin(const ButtonConfig& cfg) {
   }
 }
 
-void Buttons::poll(hg::App& app) {
+void Buttons::sample() {
+  // One step per scheduler tick. A paint that cooperates many times in the
+  // same 10 ms must not burn the 3-tick debounce in one frame.
+  const TickType_t now = xTaskGetTickCount();
+  if (sampled_at_ == now) return;
+  sampled_at_ = now;
   for (auto& b : buttons_) {
     if (b.gpio < 0) continue;
-    bool down = gpio_get_level(static_cast<gpio_num_t>(b.gpio)) == 0;
+    const bool down = gpio_get_level(static_cast<gpio_num_t>(b.gpio)) == 0;
     if (down == b.pressed) {
       b.stable = 0;
       continue;
@@ -34,9 +39,16 @@ void Buttons::poll(hg::App& app) {
     if (++b.stable >= kDebounceTicks) {
       b.pressed = down;
       b.stable = 0;
-      app.on_button(b.id, down);
+      if (pending_n_ < 8) pending_[pending_n_++] = Edge{b.id, down};
     }
   }
+}
+
+void Buttons::poll(hg::App& app) {
+  sample();
+  const uint8_t n = pending_n_;
+  pending_n_ = 0;
+  for (uint8_t i = 0; i < n; ++i) app.on_button(pending_[i].id, pending_[i].down);
 }
 
 }  // namespace hgp

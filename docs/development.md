@@ -120,7 +120,7 @@ On a board, open `hermes-gadget console --port <port>` and run the same commands
 
 | Command | Effect |
 |---|---|
-| `perf bench [scroll \| mascot \| redraw \| all]` | Draws a fixed workload, 120 updates each, one per app tick, with the device's own bars. `scroll` moves a 60-paragraph reply one line per update, `mascot` animates the talking mascot, and `redraw` repaints the whole screen every update. `all` runs the three in turn. The normal screen returns afterwards |
+| `perf bench [scroll \| mascot \| redraw \| all]` | Draws a fixed workload, 120 updates each, one per app tick, with the device's own bars. `scroll` moves a 60-paragraph reply one line per update, `mascot` animates the talking face, and `redraw` repaints the whole screen every update. `all` runs the three in turn. The normal screen returns afterwards |
 | `perf` | `@perf` JSON: the live statistics while timing is on, and the last bench under `bench` |
 | `perf on` / `perf off` | Time the device's own screen updates |
 | `perf reset` | Clear the live statistics |
@@ -129,6 +129,8 @@ On a board, open `hermes-gadget console --port <port>` and run the same commands
 The bench draws the same frames on every run, so compare its numbers between builds on the same board or computer. While timing is on, the log gets a summary line every 10 seconds when something was drawn, for example `perf: frames 120 (missed 0 > 16.7 ms, idle 4), ms p50/p95/max: render ...`. The `diag` report includes the live statistics under `frames`. On the ESP32, `CONFIG_HG_FRAME_STATS` turns timing on from boot, and `CONFIG_HG_FRAME_BUDGET_US` and `CONFIG_HG_FRAME_LOG_S` set the budget and the log interval (menuconfig: Hermes Gadget).
 
 Simulator numbers measure the core on your computer, not the board's CPU or panel. Label each result as simulator or hardware, and name the board and build when you report it.
+
+A settled hero face does not redraw the dithered disc. The body is cached and only the eye box is blitted and flushed; the panel copies the next DMA band into a second bounce buffer while the previous band is on the bus. The face tests print a host timing for that split (`cached` versus `full disc`). It is not the ESP32 number. On the 2.06, idle Ready is expected around 4–8 ms render and 8–12 ms flush at the 80 MHz idle clock; a morph frame still rasterises the disc and can miss 33 ms. Those are estimates, not a flashed measurement.
 
 ### Build checks
 

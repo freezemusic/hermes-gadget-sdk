@@ -2,6 +2,7 @@
 // core (hg::App) and runs the app loop on the main task.
 #include "port.hpp"  // first: pulls in FreeRTOS.h ahead of task.h/queue.h
 
+#include <cstdio>
 #include <cstring>
 
 #include "driver/gpio.h"
@@ -142,9 +143,15 @@ void dispatch(hg::App& app, hgp::Event& ev) {
     case EventType::NetDown:
       app.on_network(false, text ? text : "");
       break;
-    case EventType::WifiDisconnected:
-      g_wifi.disconnected();
+    case EventType::WifiDisconnected: {
+      int reason = 0;
+      if (text) std::sscanf(text, "Wi-Fi lost (reason %d)", &reason);
+      g_wifi.disconnected(reason);
       app.on_network(false, text ? text : "");
+      break;
+    }
+    case EventType::WifiBeaconTimeout:
+      g_wifi.on_beacon_timeout();
       break;
     case EventType::WifiStarted: g_wifi.reconfigure(); break;
     case EventType::WifiScanDone: g_wifi.scan_done(); break;
@@ -155,6 +162,10 @@ void dispatch(hg::App& app, hgp::Event& ev) {
     case EventType::WsText: app.on_transport_text(std::string_view(text, ev.len)); break;
     case EventType::WsBinary: app.on_transport_binary(ev.data, ev.len); break;
     case EventType::WsClosed: app.on_transport_closed(text ? text : "closed"); break;
+    case EventType::WsArm:
+      g_transport.arm();
+      app.on_transport_armed();
+      break;
     case EventType::Mic:
       app.on_mic_samples(reinterpret_cast<const int16_t*>(ev.data), ev.len / sizeof(int16_t));
       break;
@@ -279,6 +290,12 @@ extern "C" void app_main(void) {
     if (board.light_sleep && g_codec.mic_link().switchable) g_codec_speaker.allow_power_down(g_codec.mic_link().format);
   }
   g_buttons.begin(board.buttons);
+  // Long face paints and DMA waits call this so a held button still debounces
+  // and the touch task can run. It must not enter the app.
+  hg::set_cooperate([] {
+    g_buttons.sample();
+    taskYIELD();
+  });
   const bool touch = peripherals_ready && (board.touch.enabled || board.pwr_key.enabled || board.encoder.a >= 0) &&
                      g_touch.begin(board.touch, board.pwr_key, board.encoder,
                                    board.touch.bus.sda >= 0 ? hgp::i2c::touch_bus(board.touch.bus) : i2c_bus);
@@ -322,6 +339,7 @@ extern "C" void app_main(void) {
   if (hal.mic == &g_codec_mic) {
     profile.mic_rate = hgp::CodecAudio::kRate;
     profile.vad_min_rms = board.codec.vad_min_rms;
+    profile.mic_gain_db = board.codec.mic_gain_db;
   }
   if (hal.speaker == &g_codec_speaker) profile.speaker_rate = hgp::CodecAudio::kRate;
 
@@ -341,6 +359,7 @@ extern "C" void app_main(void) {
     app.on_phone_pair_close = [] { g_phone.close_pairing(); };
     app.on_phone_forget = [] { g_phone.forget(); };
   }
+  app.on_rejoin_wifi = [] { return g_wifi.rejoin_station(); };
   app.on_wifi_setup = [] { return g_wifi.start_setup(); };
   app.on_wifi_setup_close = [] { g_wifi.stop_setup(); };
   app.on_wifi_setup_ap = [] { return g_wifi.setup_ap(); };

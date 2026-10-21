@@ -1,10 +1,21 @@
 #include "hg/canvas.hpp"
 
 #include <algorithm>
+#include <cstring>
 
 #include "hg/font.hpp"
 
 namespace hg {
+
+uint16_t* Canvas::mutable_row(int y) {
+  if (y < 0 || y >= h_) return nullptr;
+  return px_ + static_cast<size_t>(y) * stride_;
+}
+
+const uint16_t* Canvas::encoded_row(int y) const {
+  if (y < 0 || y >= h_) return nullptr;
+  return px_ + static_cast<size_t>(y) * stride_;
+}
 
 void Canvas::set_clip_rows(int y0, int y1) {
   clip_y0_ = std::max(0, y0);
@@ -14,6 +25,29 @@ void Canvas::set_clip_rows(int y0, int y1) {
 void Canvas::pixel(int x, int y, uint16_t color) {
   if (x < 0 || x >= w_ || y < clip_y0_ || y >= clip_y1_ || y >= h_) return;
   px_[y * stride_ + x] = encode(color);
+}
+
+uint16_t Canvas::get(int x, int y) const {
+  if (x < 0 || x >= w_ || y < 0 || y >= h_) return 0;
+  const uint16_t c = px_[y * stride_ + x];
+  return swap_ ? static_cast<uint16_t>((c >> 8) | (c << 8)) : c;
+}
+
+void Canvas::blend(int x, int y, uint16_t color, int coverage) {
+  if (coverage <= 0 || x < 0 || x >= w_ || y < clip_y0_ || y >= clip_y1_ || y >= h_) return;
+  if (coverage >= 256) {
+    px_[y * stride_ + x] = encode(color);
+    return;
+  }
+  uint16_t d = px_[y * stride_ + x];
+  if (swap_) d = static_cast<uint16_t>((d >> 8) | (d << 8));
+  const int dr = (d >> 11) & 31, dg = (d >> 5) & 63, db = d & 31;
+  const int sr = (color >> 11) & 31, sg = (color >> 5) & 63, sb = color & 31;
+  const int r = dr + (sr - dr) * coverage / 256;
+  const int g = dg + (sg - dg) * coverage / 256;
+  const int b = db + (sb - db) * coverage / 256;
+  const uint16_t out = static_cast<uint16_t>((r << 11) | (g << 5) | b);
+  px_[y * stride_ + x] = encode(out);
 }
 
 void Canvas::fill_rect(int x, int y, int w, int h, uint16_t color) {
@@ -55,6 +89,77 @@ void Canvas::fill_circle(int cx, int cy, int r, uint16_t color) {
     int dx = 0;
     while ((dx + 1) * (dx + 1) + dy * dy <= r * r) ++dx;
     fill_rect(cx - dx, cy + dy, 2 * dx + 1, 1, color);
+  }
+}
+
+namespace {
+
+// cos(0..90 degrees) in 256ths. sin(d) = cos(90-d).
+constexpr int16_t kCos256[91] = {
+    256, 256, 256, 256, 255, 255, 255, 254, 254, 253, 252, 251, 250, 249, 248, 247, 246, 245, 243, 242, 241,
+    239, 237, 236, 234, 232, 230, 228, 226, 224, 222, 219, 217, 215, 212, 210, 207, 204, 202, 199, 196, 193,
+    190, 187, 184, 181, 178, 175, 171, 168, 165, 161, 158, 154, 150, 147, 143, 139, 136, 132, 128, 124, 120,
+    116, 112, 108, 104, 100, 96,  92,  88,  83,  79,  75,  71,  66,  62,  58,  53,  49,  44,  40,  36,  31,
+    27,  22,  18,  13,  9,   4,   0};
+
+void sincos256(int deg, int& s, int& c) {
+  while (deg < 0) deg += 360;
+  deg %= 360;
+  const int q = deg / 90;
+  const int d = deg % 90;
+  const int sinv = q & 1 ? kCos256[d] : kCos256[90 - d];
+  const int cosv = q & 1 ? kCos256[90 - d] : kCos256[d];
+  s = q == 0 || q == 1 ? sinv : -sinv;
+  c = q == 0 || q == 3 ? cosv : -cosv;
+}
+
+bool in_stadium(int lx, int ly, int hw, int hh) {
+  const int ax = lx < 0 ? -lx : lx;
+  const int ay = ly < 0 ? -ly : ly;
+  if (hh >= hw) {
+    const int inner = hh - hw;
+    if (ay <= inner) return ax <= hw;
+    const int dy = ay - inner;
+    return ax * ax + dy * dy <= hw * hw;
+  }
+  const int inner = hw - hh;
+  if (ax <= inner) return ay <= hh;
+  const int dx = ax - inner;
+  return dx * dx + ay * ay <= hh * hh;
+}
+
+}  // namespace
+
+void Canvas::fill_tilted_capsule(int cx, int cy, int hw, int hh, int tilt_deg, uint16_t color) {
+  if (hw < 1) hw = 1;
+  if (hh < 1) hh = 1;
+  int s = 0, c = 256;
+  sincos256(tilt_deg, s, c);
+  const int ext = hw + hh + 1;
+  for (int y = cy - ext; y <= cy + ext; ++y) {
+    const int dy = y - cy;
+    int x0 = 0;
+    bool any = false;
+    for (int dx = -ext; dx <= ext; ++dx) {
+      const int lx = (dx * c + dy * s) >> 8;
+      const int ly = (-dx * s + dy * c) >> 8;
+      if (in_stadium(lx, ly, hw, hh)) {
+        x0 = cx + dx;
+        any = true;
+        break;
+      }
+    }
+    if (!any) continue;
+    int x1 = x0;
+    for (int dx = ext; dx >= x0 - cx; --dx) {
+      const int lx = (dx * c + dy * s) >> 8;
+      const int ly = (-dx * s + dy * c) >> 8;
+      if (in_stadium(lx, ly, hw, hh)) {
+        x1 = cx + dx;
+        break;
+      }
+    }
+    fill_rect(x0, y, x1 - x0 + 1, 1, color);
   }
 }
 
@@ -127,6 +232,25 @@ void Canvas::blit(int x, int y, int w, int h, const uint16_t* src) {
       if (xx < 0 || xx >= w_) continue;
       px_[yy * stride_ + xx] = encode(src[row * w + col]);
     }
+  }
+}
+
+void Canvas::blit_encoded(int x, int y, int w, int h, const uint16_t* src, int src_stride) {
+  if (!src || w <= 0 || h <= 0) return;
+  if (src_stride < w) src_stride = w;
+  for (int row = 0; row < h; ++row) {
+    const int yy = y + row;
+    if (yy < clip_y0_ || yy >= clip_y1_ || yy >= h_ || yy < 0) continue;
+    int x0 = x;
+    int x1 = x + w;
+    const uint16_t* s = src + static_cast<size_t>(row) * src_stride;
+    if (x0 < 0) {
+      s += -x0;
+      x0 = 0;
+    }
+    if (x1 > w_) x1 = w_;
+    if (x0 >= x1) continue;
+    std::memcpy(px_ + static_cast<size_t>(yy) * stride_ + x0, s, static_cast<size_t>(x1 - x0) * sizeof(uint16_t));
   }
 }
 

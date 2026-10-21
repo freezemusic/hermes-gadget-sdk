@@ -15,6 +15,7 @@
 |---|---|
 | `hermes plugins install` is blocked with a "dangerous" verdict | Install from the `plugin` directory: use the command in [Connect Hermes](connect-hermes.md#1-install-the-plugin). The repository root is not a plugin, and its scan includes the Raspberry Pi installer |
 | Device stays on Connecting | Use the URL from `hermes gadget info`. Keep the gateway running and allow its port through the host firewall. A board cannot use `127.0.0.1` to reach another computer |
+| Wi-Fi looks joined but every Hermes retry ends `connect timeout` | The station can still report an address after the router changes channel, and a stuck TLS client keeps dialing a name it already resolved. Current firmware destroys that client, looks the name up again, rejoins Wi-Fi after three timeouts, and restarts after six. `reconnect` rejoins Wi-Fi as well. A soft reset is the same last step the firmware takes on its own |
 | Device stops answering after Hermes, its proxy or a tunnel restarts | Firmware 0.2.0 could stop for good when the server dropped the WebSocket; its log fills with `event queue full; dropping event 6`. Update the firmware. Newer firmware reconnects by itself, and restarts if its WebSocket send task gets stuck (`the WebSocket send task is stuck; restarting` in the log). If it still stops, [save a board report](#save-a-board-report) |
 | `No matching trusted root certificate found` in the log for a `wss://` address | The server's certificate chain does not reach a root certificate the firmware trusts. List the chain with `openssl s_client -connect <host>:443 -servername <host> -showcerts`. Firmware 0.2.0 rejected Cloudflare tunnels (`*.trycloudflare.com`); update the firmware. See [remote access](tailscale-funnel.md#security-and-troubleshooting) |
 | Board cannot join Wi-Fi | Check the password and use a 2.4 GHz network |
@@ -29,7 +30,7 @@
 |---|---|
 | Demo only echoes text | That is the scripted demo. [Connect Hermes](connect-hermes.md) for agent replies |
 | Simulator records silence | Install the audio extra and enable the microphone in **Settings** or use `--live-audio`. Check the system microphone permissions and default input. The audio status under the conversation reports microphone errors |
-| Voice is not transcribed | Configure speech recognition on the Hermes computer |
+| Voice is not transcribed | Configure speech recognition on the Hermes computer. On the 2.06 watch, a quiet clip (peaks of a few hundred counts) plus the press at the start of the recording used to be dropped as silence. Current firmware sets the ES7210 to 37.5 dB, drops the first 200 ms and raises the rest toward −3 dBFS, capped at +30 dB (`set mic_boost`). `set mic_gain` changes the codec PGA |
 | Replies are text only | Configure TTS, check that `speak_replies` is not `false`, and enable simulator live audio. Non-WAV TTS needs `ffmpeg` on the Hermes computer |
 
 ## Screen

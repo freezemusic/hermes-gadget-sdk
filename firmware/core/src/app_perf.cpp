@@ -151,7 +151,12 @@ void App::bench_step() {
       m.scroll = step <= span ? step : 2 * span - step;
       break;
     }
-    case Bench::Mascot: m.frame = static_cast<uint32_t>(2 * i); break;  // the mouth moves every 2 frames
+    case Bench::Mascot:
+      m.frame = static_cast<uint32_t>(2 * i);
+      m.face_frame = static_cast<uint32_t>(i);  // the speaking bounce moves every frame
+      m.voice = static_cast<uint8_t>(40 + (i % 5) * 12);
+      m.speaking = true;
+      break;
     case Bench::Redraw: ui_->invalidate(); break;
     case Bench::None: return;
   }

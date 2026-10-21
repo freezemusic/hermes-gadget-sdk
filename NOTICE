@@ -40,7 +40,17 @@ assets/mascot/nous-girl-white-1024.png, the mascot bitmaps generated from it
 (firmware/core/src/mascot_data.cpp) and the project logo derived from it
 (docs/images/logo.png) are based on artwork from the Hermes Agent repository,
 https://github.com/NousResearch/hermes-agent, released under the MIT License,
-Copyright (c) 2025 Nous Research.
+Copyright (c) 2025 Nous Research. The screen does not draw those bitmaps.
+
+Blink spacing, the one-in-five double blink, glance spacing and the exponential
+glance ease in firmware/core/src/face.cpp are adapted from zongzhu-bot,
+https://github.com/Liu-zhongxian/zongzhu-bot,
+xiaozhi-esp32/main/boards/common/zongzhu/eye_model.h and eye_display.h,
+commit b47140208d65ef46e53bf109d498dc6adf3116bd,
+Copyright (c) 2025 Shenzhen Xinzhi Future Technology Co., Ltd. and
+Copyright (c) 2025 Project Contributors, MIT License. The full license is
+LICENSES/zongzhu-MIT.txt. The coloured disc, the pill geometry and the moods
+mapped onto this project's screens are original.
 
 The CO5300 panel start-up commands in firmware/esp32/main/port_amoled.cpp (the
 register values and their order) follow Waveshare's board support package for

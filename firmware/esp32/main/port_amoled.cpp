@@ -132,8 +132,10 @@ bool AmoledDisplay::begin(const AmoledConfig& cfg) {
   cfg_ = cfg;
   const size_t px = static_cast<size_t>(cfg.width) * cfg.height;
   fb_ = static_cast<uint16_t*>(heap_caps_malloc(px * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  bounce_ = static_cast<uint16_t*>(heap_caps_malloc(static_cast<size_t>(cfg.width) * kBounceRows * 2, MALLOC_CAP_DMA));
-  if (!fb_ || !bounce_) {
+  const size_t bounce_bytes = static_cast<size_t>(cfg.width) * kBounceRows * 2;
+  bounce_[0] = static_cast<uint16_t*>(heap_caps_malloc(bounce_bytes, MALLOC_CAP_DMA));
+  bounce_[1] = static_cast<uint16_t*>(heap_caps_malloc(bounce_bytes, MALLOC_CAP_DMA));
+  if (!fb_ || !bounce_[0]) {
     ESP_LOGE(TAG, "not enough memory for a %ux%u framebuffer (is PSRAM enabled?)", cfg.width, cfg.height);
     return false;
   }
@@ -193,15 +195,20 @@ bool AmoledDisplay::begin(const AmoledConfig& cfg) {
     command(init[i].cmd, init[i].data, init[i].len);
     if (init[i].delay_ms) vTaskDelay(pdMS_TO_TICKS(init[i].delay_ms));
   }
-  // A timed-out margin transfer may still own bounce_. Leave it untouched and
+  // A timed-out margin transfer may still own bounce_[0]. Leave it untouched and
   // keep this display out of the HAL instead of starting normal drawing.
   if (!blank_margins()) return false;
-  // Each band's DMA transfer must finish before the bounce buffer is refilled.
+  // Two slots: the idle buffer is filled while the other band is on the bus.
+  // One slot, if the second alloc failed, refills only after DMA completes.
+  const int slots = bounce_[1] ? 2 : 1;
   bands_.emplace(
-      cfg.height, kBounceRows, 100,
-      [this](int y, int rows) {
+      cfg.height, kBounceRows, 100, slots,
+      [this](int slot, int y, int rows) {
         const int w = cfg_.width;
-        std::memcpy(bounce_, fb_ + static_cast<size_t>(y) * w, static_cast<size_t>(rows) * w * 2);
+        std::memcpy(bounce_[slot], fb_ + static_cast<size_t>(y) * w, static_cast<size_t>(rows) * w * 2);
+      },
+      [this](int slot, int y, int rows) {
+        const int w = cfg_.width;
         const int x0 = cfg_.gap_x, x1 = cfg_.gap_x + w - 1;
         const int ya = y + cfg_.gap_y, yb = y + rows - 1 + cfg_.gap_y;
         const uint8_t cols[4] = {static_cast<uint8_t>(x0 >> 8), static_cast<uint8_t>(x0), static_cast<uint8_t>(x1 >> 8),
@@ -210,10 +217,10 @@ bool AmoledDisplay::begin(const AmoledConfig& cfg) {
                                   static_cast<uint8_t>(yb)};
         command(0x2A, cols, 4);
         command(0x2B, lines, 4);
-        return esp_lcd_panel_io_tx_color(io_, static_cast<int>(kRamWrite), bounce_, static_cast<size_t>(rows) * w * 2) ==
-               ESP_OK;
+        return esp_lcd_panel_io_tx_color(io_, static_cast<int>(kRamWrite), bounce_[slot],
+                                         static_cast<size_t>(rows) * w * 2) == ESP_OK;
       },
-      [this](uint32_t ms) { return xSemaphoreTake(done_, pdMS_TO_TICKS(ms)) == pdTRUE; });
+      [this](uint32_t ms) { return wait_dma(done_, ms); });
   ESP_LOGI(TAG, "CO5300 %ux%u ready", cfg.width, cfg.height);
   return true;
 }
@@ -225,7 +232,7 @@ bool AmoledDisplay::begin(const AmoledConfig& cfg) {
 bool AmoledDisplay::blank_margins() {
   if (cfg_.gap_y <= 0) return true;
   const int w = cfg_.width, rows = std::min<int>(cfg_.gap_y, kBounceRows);
-  std::memset(bounce_, 0, static_cast<size_t>(w) * rows * 2);
+  std::memset(bounce_[0], 0, static_cast<size_t>(w) * rows * 2);
   const int x0 = cfg_.gap_x, x1 = cfg_.gap_x + w - 1;
   const uint8_t cols[4] = {static_cast<uint8_t>(x0 >> 8), static_cast<uint8_t>(x0), static_cast<uint8_t>(x1 >> 8),
                            static_cast<uint8_t>(x1)};
@@ -236,7 +243,7 @@ bool AmoledDisplay::blank_margins() {
                                 static_cast<uint8_t>(yb)};
       command(0x2A, cols, 4);
       command(0x2B, lines, 4);
-      if (esp_lcd_panel_io_tx_color(io_, static_cast<int>(kRamWrite), bounce_, static_cast<size_t>(n) * w * 2) != ESP_OK ||
+      if (esp_lcd_panel_io_tx_color(io_, static_cast<int>(kRamWrite), bounce_[0], static_cast<size_t>(n) * w * 2) != ESP_OK ||
           xSemaphoreTake(done_, pdMS_TO_TICKS(100)) != pdTRUE) {
         ESP_LOGW(TAG, "couldn't blank rows %d-%d outside the window", y, yb);
         return false;

@@ -18,6 +18,8 @@
 #include "hg/frame_stats.hpp"
 #include "hg/hal.hpp"
 #include "hg/json.hpp"
+#include "hg/link_recover.hpp"
+#include "hg/mic_capture.hpp"
 #include "hg/ui.hpp"
 #include "hg/vad.hpp"
 
@@ -40,6 +42,9 @@ struct DeviceProfile {
   std::string default_access_token;
   uint32_t mic_rate = 16000;
   float vad_min_rms = 500.0f;  // tap mode: the quietest block that counts as speech (a quiet mic wants less)
+  // Codec PGA in dB when `mic_gain` is not set. 24 matches the ES7210 driver's
+  // usual step; a board with a quiet mic raises it (the 2.06 uses 37.5).
+  float mic_gain_db = 24.0f;
   uint32_t speaker_rate = 16000;
   bool has_cancel_button = true;
   bool has_scroll_buttons = false;
@@ -88,6 +93,9 @@ class App {
   void on_transport_text(std::string_view text);
   void on_transport_binary(const uint8_t* data, size_t len);
   void on_transport_closed(std::string_view reason);
+  // The port has destroyed the previous WebSocket client and opened the next
+  // one. The connect timeout is measured from here when the open had to wait.
+  void on_transport_armed();
   void on_button(Button button, bool pressed);
   void on_mic_samples(const int16_t* samples, size_t count);
 
@@ -153,6 +161,10 @@ class App {
   std::function<void(std::string_view key)> on_setting_changed;
   // The name of the Wi-Fi network the device is on, or empty; for `wifi list`.
   std::function<std::string()> current_wifi;
+  // Drop the station and join it again (a stale association, or `reconnect`).
+  // False when this port has no station. Must not call back into the app; the
+  // disconnect arrives later as on_network(false).
+  std::function<bool()> on_rejoin_wifi;
   // Adds the port's facts to the console's `diag` report: memory, reset reason,
   // radio, which drivers came up.
   std::function<void(json::Value& report)> on_diag;
@@ -233,8 +245,12 @@ class App {
   void render(const UiModel& m);
   std::string setting(std::string_view key, std::string_view fallback = {}) const;
   void connect_now();
-  void schedule_reconnect();
-  void drop_session(std::string_view reason);
+  void arm_reconnect(uint32_t delay_ms, bool hold_for_wifi);
+  // `connect_failed` is a handshake that never opened (the app's own timeout,
+  // or the client giving up while still connecting). Those count toward
+  // rejoining Wi-Fi and, later, a restart. A server that hung up does not.
+  void drop_session(std::string_view reason, bool connect_failed = false);
+  uint8_t jitter_byte() const;
   bool send(const json::Value& msg);
   void send_hello();
   bool can_talk() const;
@@ -264,6 +280,10 @@ class App {
   void flush_display_state();
   void set_hint_flash(std::string text);
   void update_model();
+  // One step of the face clock: morph, sleep, shape. Reactions are published
+  // with the model so a status phrase shows up on the same frame.
+  void step_face(const UiModel& m);
+  void publish_face(UiModel& m);
   void log(LogLevel level, std::string_view msg);
   uint32_t now() const { return hal_.system->now_ms(); }
   bool speaking() const;
@@ -329,11 +349,12 @@ class App {
   uint32_t boot_until_ = 0;
   uint32_t reconnect_at_ = 0;
   bool reconnect_pending_ = false;
+  uint32_t rejoin_wait_until_ = 0;  // station rejoin that never dropped the link
   uint32_t phase_since_ = 0;
   uint32_t online_since_ = 0;
   uint32_t last_rx_ = 0;
   uint32_t heartbeat_ms_ = 20000;
-  int backoff_ = 0;
+  LinkRecover link_;
   int attempts_ = 0;
   std::string fatal_;   // unrecoverable until reconfigured
   std::string last_close_;
@@ -366,6 +387,10 @@ class App {
   uint32_t page_at_ = 0;  // when long text turns its next page
   uint8_t level_ = 0;
   Vad vad_;
+  MicCapture mic_capture_;
+  int mic_boost_db_ = MicCapture::kDefaultBoostDb;
+  float mic_gain_db_ = 24.0f;
+  std::vector<int16_t> mic_pcm_;  // one capture block, trimmed and normalised before upload
   std::vector<uint8_t> frame_buf_;
   std::vector<int16_t> pcm_buf_;
   int in_stream_ = -1;
@@ -419,6 +444,31 @@ class App {
   crypto::Sha256 ota_hash_;
 
   uint32_t frame_at_ = 0;
+  uint32_t face_at_ = 0;
+  uint32_t face_frame_ = 0;
+  uint8_t voice_ = 0;       // last speaker block, 0..100, decays between blocks
+  uint32_t voice_at_ = 0;
+  bool happy_arm_ = false;  // a successful turn wants a smile the next time the face shows
+  uint32_t happy_until_ = 0;  // face frame the smile runs until; 0 = off
+  // Reply text waits until that smile has played. Starting the linger at
+  // turn.end put the Ready screen up before the face could morph out or smile.
+  bool reply_after_smile_ = false;
+  bool face_stepped_ = false;
+  uint8_t face_morph_ = 0;       // 0 body .. 100 three dots
+  uint8_t face_shape_ = 0;       // 0 circle, 1 pebble, 2 squircle, 3 triangle
+  uint8_t face_shape_k_ = 0;     // blend toward face_shape_
+  uint8_t face_wake_ = 100;      // 0 one dot .. 100 full body
+  bool face_asleep_ = false;
+  uint8_t face_reaction_ = 0;
+  bool face_busy_ = false;
+  bool idle_mark_valid_ = false;
+  uint32_t idle_mark_ = 0;
+  uint32_t surprised_until_ = 0;
+  uint32_t confused_until_ = 0;
+  bool confuse_arm_ = false;
+  uint8_t shape_phase_ = 0;  // 0 idle, 1 blend in, 2 hold, 3 blend out
+  uint8_t shape_next_ = 1;
+  uint32_t shape_hold_ = 0;
 
   // frame timing: the running statistics while `perf` is on, and the bench
   std::unique_ptr<FrameStats> frame_stats_;

@@ -1,14 +1,158 @@
 # Faces
 
-The device draws a face on its screen: three 1-bit frames, idle, blink and talk, at 64, 96,
-144 and 192 px. **A face is built into the firmware**, so the shipped one is the Hermes Agent
-mascot, and changing it means building your own firmware image. Once built, `hermes gadget
-update` can install that image over the air. Release firmware, whether from
-`hermes gadget update --latest` or the browser installer, carries the default face, so a
-custom face comes back by rebuilding it.
+Hero screens draw a face in code: a shaded body and two dark eyes, with no mouth.
+The same routine covers idle, listening, thinking, speaking, boot, connecting, pairing,
+offline, errors, questions and short cards. A successful reply morphs back and smiles
+before the text screen; that text then replaces the face until it times out.
 
-The generator is `hermes-gadget face`. It replaces the old `tools/gen_mascot.py`, and with no
-arguments it regenerates the mascot, byte for byte, from the project's own artwork.
+The pose is a function of the frame counter and the style the app passes in. The renderer
+never reads a clock and never draws a random number, so the same model is the same pixels.
+
+The body is about two thirds of the free width. Rings stick out past the disc, and the
+caption starts below that silhouette with a clear line of background, so the status text
+does not sit on the body. Colour runs in a smooth diagonal from a light top-left to a
+deeper bottom-right of the same hue. RGB565 truncates that gradient into rings; the disc
+adds a two-step ordered term per channel and spreads the truncated remainder with
+Floyd–Steinberg, which is what actually breaks the bands. The silhouette and the eyes are
+coverage-antialiased against whatever is already in the framebuffer. The eyes are
+`#0D0D0D`, tilted a few degrees and slightly uneven from each other, with tapered ends.
+
+## What the watch shows
+
+The activity names and the hold times below follow the Grok Bot iOS app, version 0.18.0.
+The table was extracted by [grok-icon-study](https://github.com/blessonism/grok-icon-study)
+(unofficial; not published by xAI). This firmware does not ship that extract. The poses,
+the gradient and the timing code are written for this project. Blink spacing still follows
+zongzhu-bot, because that schedule is what the host tests lock in; the app's own idle blink
+window is slower (about 6–14 s) and is cited here only as reference.
+
+| App state | On this watch | What you see |
+|---|---|---|
+| idle | Ready, boot, short cards, waiting for the user | Neutral circle. Blinks, glances, a slow breath. After the first second, an occasional reaction for about 1.2 s (curious, playful, proud, shy, wink, surprised, wide eyes), then about 3 s of neutral. After about 30 s the body sometimes eases into a pebble, a squircle or a triangle and back |
+| listening, dictating | Microphone recording, and a question | Attentive. The eyes grow with the microphone level |
+| thinking | Waiting for the server, and the status line is empty | The body and the eyes morph into three dots (mid, light, dark). They pulse until the reply starts, then morph back. Looking up is only the start of that morph |
+| working | Thinking, and Hermes sent a status phrase that is not a search | The body stays. The eyes take the curious pose. The headline says Working |
+| searching | Thinking, and the status phrase contains "search" | The body stays. Wide eyes. The headline says Searching |
+| receiving, speaking | TTS playing | The eyes bounce with the speaker level, including after the reply text has arrived. The first moment back from the three dots is a short surprised pose. The text screen follows the smile |
+| loading | Connecting, and a firmware update | A whirl of thin green, teal, purple and yellow elliptical rings around the body. Updating uses a triangle body; connecting keeps the circle |
+| orbit | Mandy relaying to another persona | Not shown. This protocol has no event for that hand-off |
+| alerting | Error, or anything else that needs attention on the error screen | A red exclamation mark and no body |
+| sleeping | Offline for about 7 s, ready and untouched for about 25 s | The body fades to a single dot. Until then, offline is two small sleepy dots on a dim disc |
+| powering-down | The screen has dimmed on its way to the backlight timeout | The same fade to one dot, then the panel turns off as before |
+| waking | Leaving sleep or the dimmed fade, because something happened | The dot grows back into the body over about 0.8 s |
+| happy, celebrate | A successful reply just finished | Two short, nearly level dashes for about 3 s, on the face, before any Ready text. Celebrate uses the same smile. The 20 s linger starts when the smile ends |
+| confused | The turn failed and there is no reply text | For about 3 s once the face is back: one eye open, the other a flat dash, on the blue body. The notice line is unchanged |
+| other reactions (curious, playful, proud, shy, wink, surprised, and wide eyes) | Occasional idle variety | See idle. Each hold is about 1.2 s, which is the app's onboarding cadence (`k_t` is 1.5 s; the poses' own holds in the extract are longer and are not copied one-for-one) |
+
+A successful reply arms the smile. A failure arms the confused pose and does not smile.
+There is no separate "server is in a tool" flag. A non-empty `status` phrase is the only
+signal Hermes sends, so working and searching are that phrase, and anything without one
+stays on the three-dot thinking morph.
+
+## Changing colours and timing
+
+Colours are RGB888 constants in `firmware/core/include/hg/face.hpp`:
+
+| Constant | What it is |
+|---|---|
+| `kBlueHi*`, `kBlue*`, `kBlueShade*` | Light, middle and deep stops of the default gradient. `kBlueCore*` is the lighter gloss mixed into the palette |
+| `kRed*` | The error mark, and the red gradient stops (the idle-red range: light `#F8C4BC`, middle `#EC665E`, deep `#E25A52`) |
+| `kDim*` | The offline gradient, a dimmer blue |
+| `kEye*` | Both pupils |
+
+`rgb565()` quantises them (red and blue in steps of 8, green in steps of 4). A one-step
+Bayer tile is smaller than those bins along a round gradient, so the panel draws rings.
+The disc adds about two steps of ordered noise per channel, then Floyd–Steinberg spreads
+whatever `rgb565()` still threw away. The pupils are painted after that, so they stay
+exactly `#0D0D0D`.
+
+Timings assume one face frame is 33 ms (`kFaceFrameMs` in `firmware/core/src/app.cpp`). The
+schedules are in `firmware/core/src/face.cpp` and `app.cpp`:
+
+| Constant | What it changes |
+|---|---|
+| `kBlinkWindow`, `kBlinkBase`, `kBlinkJitter` | Gap between blinks. With the current numbers the gap is 78 to 180 frames, 2.6 s to 6.0 s. Every fifth blink is a double. Sleep, the error mark and the sleepy offline pose do not blink |
+| the `pulse()` table | Close, hold, open. The current table is 2, 1 and 4 frames, about 70 ms, 30 ms and 140 ms |
+| `kGlanceWindow`, `kGlanceJitter` | Gap between glances, 36 to 104 frames, 1.2 s to 3.5 s. One glance in four stays put |
+| `kEase` | How fast a glance eases in and out (`1 - exp(-dt·k)`, k ≈ 11/s) |
+| `kBreathAmp` | Idle breathing added to the eye height, thousandths of the disc |
+| `kSpeakAmp`, `kSpeakVoice` | Speaking bounce. The base term plus the speaker level, about 5.2 Hz |
+| `kHappyFrames` in `app.cpp` | How long the smile lasts, in face frames (90 is about 3 s) |
+| `kConfusedFrames`, `kSurpriseFrames` | Failed-turn pose, and the short surprise as a voice reply begins |
+| `kFaceSleepReady`, `kFaceSleepOffline` | Frames before the collapse to one dot |
+| `kReactionRest`, `kReactionHold` | Idle variety: rest, then one reaction. The hold matches the ~1.2 s onboarding cadence |
+| `kShapeStart` | Face frame before the body will leave the circle. Early frames stay a circle |
+| `kBandAbove`, `kBandBelow` | Fallback eye-band limits. A settled face flushes the real eye box instead; these still describe a blink that has not moved |
+
+Poses are in `pose_left` and `pose_right`. `x`, `y`, `w` and `h` are thousandths of the disc
+diameter, origin at the centre, and `tilt` is degrees clockwise (screen y grows down).
+`UiModel::face_reaction` selects an idle pose on Ready: 1 curious, 2 playful, 3 proud,
+4 shy, 5 wink, 6 surprised, 7 wide, 8 confused. 0 keeps the screen's own pose.
+
+The blink spacing, the one-in-five double blink, the glance spacing and the exponential ease
+are adapted from [zongzhu-bot](https://github.com/Liu-zhongxian/zongzhu-bot) (MIT). The
+drawing is original. See [NOTICE](../NOTICE).
+
+While a hero face is on screen and the display is awake, the app steps a face clock about
+every 33 ms (about 30 fps). Every other screen stays on the 100 ms frame. A live face
+(anything that blinks, glances, breathes, pulses, morphs or spins) is flushed on every one
+of those ticks. The dithered disc is rasterised once per shape and colour into a buffer
+(PSRAM on the ESP32) and blitted after that. A settled blink, glance, breath or level
+change restores only the union of the previous and current eye box from that buffer, then
+draws the eyes, and flushes those rows. The caption stays where it was. Morphing, a shape
+blend, the sleep collapse and the loading swirl still clear and redraw the whole
+silhouette. Gating the flush on a picture key dropped blinks, the microphone, the dot
+pulse and the morph, because those either were not in the key or fell outside a fixed
+band; the 33 ms tick then ran and pushed nothing. A finished sleep dot and the error mark
+stay still. Microphone level is copied onto the face on that same tick
+(`App::on_mic_samples` updates it as samples arrive). Speaker level is the RMS of each TTS
+block, and it decays between blocks.
+
+On the 2.06 the idle clock is 80 MHz unless something holds the CPU up, and the panel is
+QSPI at 40 MHz. A cached eye update is expected around 4–8 ms of drawing and 8–12 ms of
+flush, under the 33 ms tick. A morph frame still walks the disc, so it can take longer.
+Those figures are estimates from the pixel counts, not a measurement on a board. The host
+benchmark in the face tests times the same split on the computer and is not the device.
+
+The watch's QMI8658 is not read by this firmware, so the face does not parallax with tilt.
+
+Host renders of each state, from the 410×486 watch window:
+
+| Ready | Listening | Thinking | Speaking |
+|---|---|---|---|
+| ![Ready](images/face/ready.png) | ![Listening](images/face/listening.png) | ![Thinking](images/face/thinking.png) | ![Speaking](images/face/speaking.png) |
+
+| Error | Pairing | Connecting | Offline |
+|---|---|---|---|
+| ![Error](images/face/error.png) | ![Pairing](images/face/pairing.png) | ![Connecting](images/face/connecting.png) | ![Offline](images/face/offline.png) |
+
+| Happy | Blink | Question | Boot |
+|---|---|---|---|
+| ![Happy](images/face/happy.png) | ![Blink](images/face/blink.png) | ![Question](images/face/prompt.png) | ![Boot](images/face/boot.png) |
+
+| Sleep | Updating |
+|---|---|
+| ![Sleep](images/face/sleep.png) | ![Updating](images/face/updating.png) |
+
+The expressions on one sheet (neutral through the three-dot pose):
+
+![Face sheet](images/face/sheet.png)
+
+Idle, including a glance and a blink, at the face clock:
+
+![Idle face](images/face/idle.gif)
+
+Thinking, from the body into the three dots and back:
+
+![Thinking morph](images/face/thinking-morph.gif)
+
+## The bitmap generator
+
+`hermes-gadget face` still turns a picture into 1-bit frames in
+`firmware/core/src/mascot_data.cpp`. **The screen does not draw those frames.** The hero
+layout calls `hg::face` instead, and a build that drops unreferenced sections does not link
+the bitmaps. The generator and its tests stay so the old artwork can still be reproduced.
+What follows is that generator. It does not change the face on the device.
 
 Artwork in this repository, in examples and in tests is original artwork. A picture of a real
 person belongs on your own device and nowhere else, and this project is independent of Nous
@@ -189,13 +333,12 @@ exactly, so there is nothing to keep in sync.
 ## How it works
 
 The frames are 1-bit bitmaps: row major, most significant bit first, rows padded to a whole
-byte, a set bit meaning ink. Four sizes exist so the UI can pick the largest one that fits the
-space it has, and three frames exist so the face can blink and talk. Between them they take
-about 27 KB of flash. See [architecture.md](architecture.md) for where they are drawn.
+byte, a set bit meaning ink. Four sizes and three frames take about 27 KB. The UI no longer
+reads them; [architecture.md](architecture.md) describes the face the screen does draw.
 
 The blink and talk frames are drawn on top of the idle frame: a blink covers each eye and cuts
 a closed lid into it, and a talking mouth is a hole cut into the ink. Both come from the
 feature positions above, which is why those positions matter.
 
-The effect anchors are written as thousandths of the drawn size, which is how `ui.cpp` reads
-them, so the waves and dots land where the artwork puts them.
+The effect anchors are written as thousandths of the drawn size. They belonged to the old
+bitmap face. The procedural face does not read them.

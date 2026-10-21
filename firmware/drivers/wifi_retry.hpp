@@ -1,6 +1,6 @@
 // When to retry joining Wi-Fi, apart from ESP-IDF so it can be tested on the
 // host (firmware/esp32/main/port_wifi.cpp). On battery the wait doubles after
-// each failed attempt, up to 30 s like the Hermes reconnect (app.cpp kBackoffMs),
+// each failed attempt, up to 30 s like the Hermes reconnect (hg/link_recover.hpp),
 // so a long stretch without coverage costs little. Plugged in it stays at 3 s.
 // While an attempt runs the chip is held awake (light sleep would stall it);
 // between attempts it may doze.
