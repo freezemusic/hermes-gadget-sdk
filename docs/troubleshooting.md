@@ -30,7 +30,7 @@
 |---|---|
 | Demo only echoes text | That is the scripted demo. [Connect Hermes](connect-hermes.md) for agent replies |
 | Simulator records silence | Install the audio extra and enable the microphone in **Settings** or use `--live-audio`. Check the system microphone permissions and default input. The audio status under the conversation reports microphone errors |
-| Voice is not transcribed | Configure speech recognition on the Hermes computer |
+| Voice is not transcribed | Configure speech recognition on the Hermes computer. On the 2.06 watch, a quiet clip (peaks of a few hundred counts) plus the press at the start of the recording used to be dropped as silence. Current firmware sets the ES7210 to 37.5 dB, drops the first 200 ms and raises the rest toward −3 dBFS, capped at +30 dB (`set mic_boost`). `set mic_gain` changes the codec PGA |
 | Replies are text only | Configure TTS, check that `speak_replies` is not `false`, and enable simulator live audio. Non-WAV TTS needs `ffmpeg` on the Hermes computer |
 
 ## Screen

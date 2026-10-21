@@ -205,11 +205,13 @@ BoardConfig make() {
   b.codec.din = 42;
   b.codec.pa = 46;
   b.codec.speaker_pa = true;  // the amplifier draws power only while sound plays
-  // Speech measured ~170 RMS on average (peaks ~3.8k) at the default 24 dB: under tap
-  // mode's 500 floor, so tap mode never heard anyone. 30 dB doubles it with headroom
-  // to spare, and the floor drops to 200 (the noise estimate still sets the threshold
-  // above it in a loud room).
-  b.codec.mic_gain_db = 30.0f;
+  // Speech at the driver's usual 24 dB averaged ~170 RMS (peaks ~3.8k), under tap
+  // mode's 500 floor. Clips saved at 30 dB still peaked around 100–400 counts.
+  // esp_codec_dev_set_in_gain casts the dB to int before the ES7210 driver, and
+  // that driver's top step is GAIN_37_5DB (register nibble 0x0E on MIC1/MIC2).
+  // 37 and 37.5 both land there: +7.5 dB over 30, which is as far as the PGA goes.
+  // The upload trim and normaliser (hg/mic_capture.hpp) make up the rest.
+  b.codec.mic_gain_db = 37.5f;
   b.codec.vad_min_rms = 200.0f;
   b.touch.enabled = true;
   b.touch.controller = TouchController::Ft5x06;  // the FT3168 sends the same report

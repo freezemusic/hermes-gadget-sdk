@@ -19,6 +19,7 @@
 #include "hg/hal.hpp"
 #include "hg/json.hpp"
 #include "hg/link_recover.hpp"
+#include "hg/mic_capture.hpp"
 #include "hg/ui.hpp"
 #include "hg/vad.hpp"
 
@@ -41,6 +42,9 @@ struct DeviceProfile {
   std::string default_access_token;
   uint32_t mic_rate = 16000;
   float vad_min_rms = 500.0f;  // tap mode: the quietest block that counts as speech (a quiet mic wants less)
+  // Codec PGA in dB when `mic_gain` is not set. 24 matches the ES7210 driver's
+  // usual step; a board with a quiet mic raises it (the 2.06 uses 37.5).
+  float mic_gain_db = 24.0f;
   uint32_t speaker_rate = 16000;
   bool has_cancel_button = true;
   bool has_scroll_buttons = false;
@@ -383,6 +387,10 @@ class App {
   uint32_t page_at_ = 0;  // when long text turns its next page
   uint8_t level_ = 0;
   Vad vad_;
+  MicCapture mic_capture_;
+  int mic_boost_db_ = MicCapture::kDefaultBoostDb;
+  float mic_gain_db_ = 24.0f;
+  std::vector<int16_t> mic_pcm_;  // one capture block, trimmed and normalised before upload
   std::vector<uint8_t> frame_buf_;
   std::vector<int16_t> pcm_buf_;
   int in_stream_ = -1;

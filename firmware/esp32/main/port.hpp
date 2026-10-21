@@ -397,6 +397,7 @@ class CodecMic final : public hg::AudioIn {
   bool begin(esp_codec_dev_handle_t dev, bool rmnm, const CodecAudio::MicLink& link);
   bool start(uint32_t sample_rate) override;
   void stop() override { capturing_ = false; }
+  void set_gain_db(float db) override;
 
  private:
   static void task(void* arg);

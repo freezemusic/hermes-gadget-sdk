@@ -55,6 +55,9 @@ class AudioIn {
   virtual ~AudioIn() = default;
   virtual bool start(uint32_t sample_rate) = 0;
   virtual void stop() = 0;
+  // Codec PGA in dB, on the app task. An I2S MEMS microphone has no PGA and
+  // ignores it. The value survives the ADC being powered down between captures.
+  virtual void set_gain_db(float db) { (void)db; }
 };
 
 // Speaker: begin() a stream, write() mono PCM16 (non-blocking, the port

@@ -179,6 +179,13 @@ bool CodecMic::begin(esp_codec_dev_handle_t dev, bool rmnm, const CodecAudio::Mi
   return true;
 }
 
+void CodecMic::set_gain_db(float db) {
+  link_.gain_db = db;
+  // Closed between recordings: the next power-up writes link_.gain_db. While a
+  // capture has the ADC open, write the register from this task as well.
+  if (capturing_ && dev_) esp_codec_dev_set_in_gain(dev_, db);
+}
+
 bool CodecMic::start(uint32_t sample_rate) {
   if (!dev_) return false;
   if (sample_rate != CodecAudio::kRate) {

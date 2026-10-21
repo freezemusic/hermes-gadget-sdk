@@ -66,7 +66,7 @@ constexpr uint32_t kOtaIdleMs = 30000;      // ...and is abandoned when no data 
 constexpr uint32_t kOtaRestartMs = 1000;    // time for ota.done to leave before the restart
 constexpr uint32_t kRejoinWaitMs = 5000;    // a station rejoin that never drops the link
 
-const char* const kSettingKeys[] = {"name", "server", "token", "talk_mode", "volume", "brightness", "screen_timeout", "battery_display", "battery_estimate", "wifi_ssid", "wifi_pass"};
+const char* const kSettingKeys[] = {"name", "server", "token", "talk_mode", "volume", "mic_gain", "mic_boost", "brightness", "screen_timeout", "battery_display", "battery_estimate", "wifi_ssid", "wifi_pass"};
 
 // NVS limits storage keys to 15 characters; keep the public setting name unchanged.
 std::string_view setting_storage_key(std::string_view key) {
@@ -145,6 +145,14 @@ void App::load_settings() {
                        : indicator == "percentage" ? BatteryIndicator::Percentage
                        : indicator == "both" ? BatteryIndicator::Both : BatteryIndicator::Off;
   battery_estimate_enabled_ = setting("battery_estimate", "off") == "liion";
+  const std::string gain = setting("mic_gain");
+  mic_gain_db_ = gain.empty() ? profile_.mic_gain_db
+                              : static_cast<float>(std::max(0, std::min(MicCapture::kPgaDbMax, std::atoi(gain.c_str()))));
+  if (hal_.mic) hal_.mic->set_gain_db(mic_gain_db_);
+  const std::string boost = setting("mic_boost");
+  int boost_db = boost.empty() ? MicCapture::kDefaultBoostDb : std::atoi(boost.c_str());
+  mic_boost_db_ = std::max(0, std::min(MicCapture::kBoostDbMax, boost_db));
+  mic_capture_.set_boost_db(mic_boost_db_);
   activity_at_ = now();
   display_dimmed_ = display_sleeping_ = false;
 }
@@ -981,6 +989,10 @@ void App::start_listening(bool hands_free) {
     return;
   }
   hands_free_ = hands_free;
+  // Nothing here plays a tone into the microphone. The press that starts a
+  // recording is a click in the first tenth of a second; the capture drops
+  // that and raises what follows before it is uploaded.
+  mic_capture_.reset(profile_.mic_rate, mic_boost_db_);
   mic_stream_ = static_cast<uint8_t>(mic_stream_ % 250 + 1);
   mic_seq_ = 0;
   mic_unsent_ = 0;
@@ -1073,19 +1085,30 @@ void App::on_mic_samples(const int16_t* samples, size_t count) {
     update_model();
     return;
   }
-  if (mode_ != Mode::Listening || count == 0) return;
+  if (mode_ != Mode::Listening || count == 0 || samples == nullptr) return;
+  // The eyes follow the microphone itself. The upload is trimmed and raised,
+  // which would pin the meter if it were metered after the gain.
   level_ = level_percent(rms(samples, count));
+  mic_pcm_.assign(samples, samples + count);
+  const size_t kept = mic_capture_.shape(mic_pcm_.data(), mic_pcm_.size());
+  if (kept == 0) return;
+  // Tap mode judges the trimmed, filtered block before the upload gain, so a
+  // pause stays under the board's floor and the opening click never counts.
+  Vad::Result verdict = Vad::Result::Continue;
+  const bool judge = hands_free_;
+  if (judge) verdict = vad_.feed(mic_pcm_.data(), kept);
+  mic_capture_.normalise(mic_pcm_.data(), kept);
   size_t off = 0;
-  while (off < count) {
-    size_t n = std::min(kMicChunkSamples, count - off);
+  while (off < kept) {
+    size_t n = std::min(kMicChunkSamples, kept - off);
     frame_buf_.resize(proto::kBinaryHeader + n * 2);
     proto::write_binary_header(frame_buf_.data(), proto::Channel::Audio, mic_stream_, mic_seq_++);
-    std::memcpy(frame_buf_.data() + proto::kBinaryHeader, samples + off, n * 2);
+    std::memcpy(frame_buf_.data() + proto::kBinaryHeader, mic_pcm_.data() + off, n * 2);
     if (!hal_.transport->send_binary(frame_buf_.data(), frame_buf_.size())) ++mic_unsent_;
     off += n;
   }
-  if (hands_free_) {
-    Vad::Result r = vad_.feed(samples, count);
+  if (judge) {
+    Vad::Result r = verdict;
     if (r == Vad::Result::EndOfSpeech) {
       finish_listening();
       update_model();
@@ -2055,6 +2078,14 @@ std::string App::console(std::string_view raw) {
       return "@error battery_display must be icon, percentage, both or off";
     if (key == "battery_estimate" && !value.empty() && value != "off" && value != "liion")
       return "@error battery_estimate must be off or liion";
+    if (key == "mic_gain" && !value.empty() &&
+        (value.size() > 2 || value.find_first_not_of("0123456789") != std::string::npos ||
+         std::atoi(value.c_str()) > MicCapture::kPgaDbMax))
+      return "@error mic_gain must be 0..42 dB";
+    if (key == "mic_boost" && !value.empty() &&
+        (value.size() > 2 || value.find_first_not_of("0123456789") != std::string::npos ||
+         std::atoi(value.c_str()) > MicCapture::kBoostDbMax))
+      return "@error mic_boost must be 0..36 dB";
     if (!hal_.storage) return "@error no storage";
     if (value.empty()) hal_.storage->erase(setting_storage_key(key));
     else if (!hal_.storage->set(setting_storage_key(key), value)) return "@error could not save " + key;

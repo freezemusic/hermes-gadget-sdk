@@ -111,8 +111,10 @@ struct FakeHal : hg::Display, hg::AudioIn, hg::AudioOut, hg::Transport, hg::Stor
 
   // Mic
   bool mic_on = false;
+  float gain_db = -1.f;
   bool start(uint32_t) override { return mic_on = true; }
   void stop() override { mic_on = false; }
+  void set_gain_db(float db) override { gain_db = db; }
 
   // Speaker
   bool spk_open = false;
@@ -311,7 +313,8 @@ TEST("app: push-to-talk streams audio and shows the reply") {
   CHECK_EQ(int(f.stream), stream);
   size_t samples = 0;
   for (auto& b : r.fake.sent_binary) samples += (b.size() - hg::proto::kBinaryHeader) / 2;
-  CHECK_EQ(samples, size_t(9600));
+  // The first 200 ms (3200 samples at 16 kHz) is the press, and is not uploaded.
+  CHECK_EQ(samples, size_t(6400));
 
   r.app.on_button(hg::Button::Talk, false);
   CHECK(!r.fake.mic_on);
@@ -395,7 +398,8 @@ TEST("app: microphone frames the link refused are counted when the recording end
   r.app.on_button(hg::Button::Talk, false);
   CHECK(r.fake.last("audio.end") != nullptr);
   bool counted = false;
-  for (const auto& l : r.fake.logs) counted |= l.find("recording: 3 of 10 audio frames not sent") != std::string::npos;
+  // Five of the ten blocks fall in the 200 ms trim, so only the later five are frames.
+  for (const auto& l : r.fake.logs) counted |= l.find("recording: 2 of 5 audio frames not sent") != std::string::npos;
   CHECK(counted);
 
   // The next recording starts from zero and, with every frame sent, logs nothing.
@@ -468,6 +472,64 @@ TEST("app: tap mode hears speech at the board's microphone level") {
   talk_quietly(d);
   CHECK(d.fake.last("audio.end") == nullptr);
   CHECK(d.fake.last("audio.cancel") != nullptr);
+}
+
+int upload_peak(const std::vector<std::vector<uint8_t>>& frames) {
+  int peak = 0;
+  for (const auto& b : frames) {
+    hg::proto::BinaryFrame f;
+    if (!hg::proto::parse_binary(b.data(), b.size(), f)) continue;
+    for (size_t i = 0; i + 1 < f.payload_len; i += 2) {
+      const int16_t s = static_cast<int16_t>(f.payload[i] | (static_cast<uint16_t>(f.payload[i + 1]) << 8));
+      const int a = s < 0 ? -static_cast<int>(s) : static_cast<int>(s);
+      if (a > peak) peak = a;
+    }
+  }
+  return peak;
+}
+
+TEST("app: a recording drops the opening click and raises a quiet voice") {
+  auto take = [](Rig& r, int boost) {
+    CHECK(r.app.console("set mic_boost " + std::to_string(boost)).find("@ok") == 0);
+    r.app.on_button(hg::Button::Talk, true);
+    std::vector<int16_t> click(3200, 20000);  // 200 ms at 16 kHz, full of the press
+    std::vector<int16_t> voice(3200);
+    for (size_t i = 0; i < voice.size(); ++i) voice[i] = (i & 16) ? -400 : 400;
+    r.app.on_mic_samples(click.data(), click.size());
+    r.app.on_mic_samples(voice.data(), voice.size());
+    size_t samples = 0;
+    for (const auto& b : r.fake.sent_binary) samples += (b.size() - hg::proto::kBinaryHeader) / 2;
+    const int peak = upload_peak(r.fake.sent_binary);
+    r.app.on_button(hg::Button::Talk, false);
+    CHECK_EQ(samples, size_t(3200));
+    return peak;
+  };
+  Rig raised;
+  raised.bring_online(true);
+  const int loud = take(raised, 30);
+  CHECK(loud > 10000);
+  CHECK(loud < 20000);
+  Rig plain;
+  plain.bring_online(true);
+  const int raw = take(plain, 0);
+  CHECK(raw > 250);
+  CHECK(raw < 600);
+}
+
+TEST("app: mic_gain is saved and applied to the codec") {
+  Rig r;
+  r.bring_online(true);
+  CHECK(r.fake.gain_db == 24.f);
+  CHECK_EQ(r.app.console("set mic_gain 37"), std::string("@ok mic_gain"));
+  CHECK(r.fake.gain_db == 37.f);
+  CHECK_EQ(r.fake.kv["mic_gain"], std::string("37"));
+  CHECK_EQ(r.app.console("set mic_gain 99"), std::string("@error mic_gain must be 0..42 dB"));
+  CHECK_EQ(r.fake.kv["mic_gain"], std::string("37"));
+  CHECK_EQ(r.app.console("set mic_boost 40"), std::string("@error mic_boost must be 0..36 dB"));
+  CHECK_EQ(r.app.console("set mic_gain"), std::string("@ok mic_gain"));
+  CHECK(r.fake.gain_db == 24.f);
+  CHECK(r.app.console("help").find("mic_gain") != std::string::npos);
+  CHECK(r.app.console("help").find("mic_boost") != std::string::npos);
 }
 
 TEST("app: a short tap is discarded instead of sent") {

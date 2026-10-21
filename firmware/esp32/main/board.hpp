@@ -132,7 +132,7 @@ struct CodecAudioConfig {
   int mclk = -1, bclk = -1, ws = -1, dout = -1, din = -1;
   int pa = -1;               // speaker amplifier enable, active high
   float amp_supply_v = 5.0f;  // amplifier supply; the ES8311 driver sets its output level from it
-  float mic_gain_db = 24.0f;
+  float mic_gain_db = 24.0f;  // ES7210 PGA. 37 or 37.5 both select the 37.5 dB ceiling (see board.cpp)
   float vad_min_rms = 500.0f;  // tap mode's speech floor for this mic (DeviceProfile::vad_min_rms)
   SpeakerCodec speaker = SpeakerCodec::Es8311;
   MicCodec mic = MicCodec::Es7210;
